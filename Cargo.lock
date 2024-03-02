@@ -7,6 +7,7 @@ name = "ai-2048"
 version = "0.1.0"
 dependencies = [
  "rand",
+ "strum",
 ]
 
 [[package]]
@@ -67,6 +68,12 @@ checksum = "ec0be4795e2f6a28069bec0b5ff3e2ac9bafc99e6a9a7dc3547996c5c816922c"
 dependencies = [
  "getrandom",
 ]
+
+[[package]]
+name = "strum"
+version = "0.26.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "723b93e8addf9aa965ebe2d11da6d7540fa2283fcea14b3371ff055f7ba13f5f"
 
 [[package]]
 name = "wasi"
