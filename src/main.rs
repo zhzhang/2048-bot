@@ -1,7 +1,6 @@
+// Implement taken from https://github.com/nneonneo/2048-ai and translated to Rust.
 use std::io::{self, Write};
 use rand::{seq::IteratorRandom, Rng, thread_rng};
-
-type Game = [u8; 16];
 
 #[derive(Copy, Clone)]
 enum Move {
@@ -11,29 +10,17 @@ enum Move {
     Down
 }
 
+struct Game<'a> {
+    left_table: &'a mut [u64; 65536],
+    right_table: &'a mut [u64; 65536],
+    up_table: &'a mut [u64; 65536],
+    down_table: &'a mut [u64; 65536]
+}
+
 static MOVES: [Move; 4] = [Move::Left, Move::Right, Move::Up, Move::Down];
+static ROW_MASK: u64 = 0xFFFF;
+static COL_MASK: u64 = 0x000F000F000F000F;
 
-fn insert_random_tile(game: Game) -> Game {
-    let open_tiles = get_open_tiles(game);
-    // Randomly pick an open tile:
-    let mut rng = thread_rng();
-    let i = open_tiles.iter().choose(&mut rng).unwrap();
-    let value = random_tile_value();
-    let mut new_game = game;
-    new_game[*i] = value;
-    new_game
-}
-
-fn get_open_tiles(game: Game) -> Vec<usize> {
-    let mut open_tiles: Vec<usize> = Vec::new();
-    for i in 0..16 {
-        let value = game[i];
-        if value == 0 {
-            open_tiles.push(i);
-        }
-    }
-    open_tiles
-}
 
 fn random_tile_value() -> u8 {
     let mut rng = rand::thread_rng();
@@ -46,137 +33,185 @@ fn random_tile_value() -> u8 {
 }
 
 
-fn execute_move(game: Game, m: Move) -> Game{
-    // Disallow a move if there's no square shift.
-    let mut head: i8 = match m {
-        Move::Left => 0,
-        Move::Right => 3,
-        Move::Up => 0,
-        Move::Down => 12
-    };
-    let step: i8 = match m {
-        Move::Left => 1,
-        Move::Right => -1,
-        Move::Up => 4,
-        Move::Down => -4
-    };
-    let rank_step: i8 = match m {
-        Move::Left => 4,
-        Move::Right => 4,
-        Move::Up => 1,
-        Move::Down => 1
-    };
-    let mut new_game = [0; 16];
-    for _ in 0..4 {
-        let mut line: Vec<u8> = Vec::new();
-        let mut i = head;
-        let mut last_value: u8 = 0;
-        for _ in 0..4 {
-            // println!("i: {}", i);
-            let value = game[(i as usize)];
-            if value != 0 {
-                if value == last_value {
-                    line.push(value + 1);
-                    last_value = 0;
-                } else {
-                    if last_value != 0 {
-                        line.push(last_value);
-                        last_value = 0;
-                    }
-                    last_value = value;
-                }
-            }
-            // println!("line: {:?}", line);
-            i += step;
-        }
-        if last_value != 0 {
-            line.push(last_value);
-        }
-        let mut i = head;
-        for val in line {
-            new_game[(i as usize)] = val;
-            i += step;
-        }
-        head += rank_step;
-    }
-    new_game
+fn insert_random_tile(board: u64) -> u64{
+    let open_tiles = get_open_tiles(board);
+    // Randomly pick an open tile:
+    let mut rng = thread_rng();
+    let i = open_tiles.iter().choose(&mut rng).unwrap();
+    let value = random_tile_value();
+    board | ((value as u64) << (4 * i))
 }
 
-fn print_game_state(game: Game) {
-    for i in 0..4 {
-        for j in 0..4 {
-            let value = game[i * 4 + j];
-            if value == 0 {
-                print!("    .");
-            } else {
-                print!("{:5}", 1 << value);
-            }
-        }
-        println!();
-    }
-}
-
-fn search(game: Game, depth: u8) -> (u8, Move) {
-    if depth == 0 {
-        return (score_game(game), Move::Up);
-    }
-    let mut best_score: u8 = 0;
-    let mut best_move: Move = Move::Left;
-    for m in MOVES {
-        let new_game = execute_move(game, m);
-        let open_tiles = get_open_tiles(new_game);
-        for i in open_tiles {
-            let mut possible_game = new_game;
-            possible_game[i] = 1;
-            let (score, _) = search(new_game, depth - 1);
-            if score > best_score {
-                best_score = score;
-                best_move = m;
-            }
-        }
-    }
-    (best_score, best_move)
-}
-
-fn score_game(game: Game) -> u8 {
-    let mut score: u8 = 0;
+fn get_open_tiles(board: u64) -> Vec<usize> {
+    let mut open_tiles: Vec<usize> = Vec::new();
     for i in 0..16 {
-        let value = game[i];
-        if value != 0 {
-            score += value;
+        let value = board >> (4 * i) & 0xF;
+        if value == 0 {
+            open_tiles.push(i);
         }
     }
-    score
+    open_tiles
 }
+
+
+fn reverse_line_repr(line_repr: u64) -> u64 {
+    // Print bits.
+    let mut reversed: u64 = 0;
+    ((line_repr >> 12) | ((line_repr >> 4) & 0xF0) | ((line_repr << 4) & 0xF00) | (line_repr << 12)) & ROW_MASK
+}
+
+fn unpack_col(row: u64) -> u64 {
+    (row | (row << 12) | (row << 24) | (row << 36)) & COL_MASK
+}
+
+
+fn transpose(board: u64) -> u64 {
+    let a1 = board & 0xF0F00F0FF0F00F0F;
+    let a2 = board & 0x0000F0F00000F0F0;
+    let a3 = board & 0x0F0F00000F0F0000;
+    let a = a1 | (a2 << 12) | (a3 >> 12);
+    let b1 = a & 0xFF00FF0000FF00FF;
+    let b2 = a & 0x00FF00FF00000000;
+    let b3 = a & 0x00000000FF00FF00;
+    b1 | (b2 >> 24) | (b3 << 24)
+}
+
+fn print_game_state(board: u64) {
+    for i in 0..16 {
+        let value = board >> (4 * i) & 0xF;
+        if value == 0 {
+            print!("    .");
+        } else {
+            print!("{:5}", 1 << value);
+        }
+        if (i + 1) % 4 == 0 {
+            println!();
+        }
+    }
+}
+
+impl Game<'_> {
+    fn fill_transition_tables(&mut self) {
+        for line_repr in 0..65536u64 {
+            let mut new_line: Vec<u64> = Vec::new();
+            let mut last_value: u64 = 0;
+            for position in 0..4 {
+                // println!("i: {}", i);
+                let value = line_repr >> (4 * position) & 0xF;
+                if value != 0 {
+                    if value == last_value {
+                        new_line.push(value + 1);
+                        last_value = 0;
+                    } else {
+                        if last_value != 0 {
+                            new_line.push(last_value);
+                            last_value = 0;
+                        }
+                        last_value = value;
+                    }
+                }
+                // println!("line: {:?}", line);
+            }
+            if last_value != 0 {
+                new_line.push(last_value);
+            }
+            let mut new_line_repr: u64 = 0;
+            for (i, value) in new_line.iter().enumerate() {
+                new_line_repr |= (*value as u64) << (4 * i);
+            }
+            self.left_table[line_repr as usize] = new_line_repr;
+            self.right_table[reverse_line_repr(line_repr.into()) as usize] = reverse_line_repr(new_line_repr);
+            self.up_table[line_repr as usize] = unpack_col(new_line_repr);
+            self.down_table[reverse_line_repr(line_repr.into()) as usize] = unpack_col(reverse_line_repr(new_line_repr));
+        }
+    }
+
+    fn execute_move(&self, board: u64, m: Move) -> u64 {
+        match m{
+            Move::Left => self.left_table[(board & ROW_MASK) as usize] | (self.left_table[(board >> 16 & ROW_MASK) as usize] << 16) | (self.left_table[(board >> 32 & ROW_MASK) as usize] << 32) | (self.left_table[(board >> 48 & ROW_MASK) as usize] << 48),
+            Move::Right => self.right_table[(board & ROW_MASK) as usize] | (self.right_table[(board >> 16 & ROW_MASK) as usize] << 16) | (self.right_table[(board >> 32 & ROW_MASK) as usize] << 32) | (self.right_table[(board >> 48 & ROW_MASK) as usize] << 48),
+            Move::Up => {
+                let tboard = transpose(board);
+                self.up_table[(tboard & ROW_MASK) as usize] | (self.up_table[(tboard >> 16 & ROW_MASK) as usize] << 4) | (self.up_table[(tboard >> 32 & ROW_MASK) as usize] << 8) | (self.up_table[(tboard >> 48 & ROW_MASK) as usize] << 12)
+            },
+            Move::Down => {
+                let tboard = transpose(board);
+                self.down_table[(tboard & ROW_MASK) as usize] | (self.down_table[(tboard >> 16 & ROW_MASK) as usize] << 4) | (self.down_table[(tboard >> 32 & ROW_MASK) as usize] << 8) | (self.down_table[(tboard >> 48 & ROW_MASK) as usize] << 12)
+            },
+            _ => board
+        }
+    }
+
+}
+
+// fn search(game: u64, depth: u8) -> (u8, Move) {
+//     if depth == 0 {
+//         return (score_game(game), Move::Up);
+//     }
+//     let mut best_score: u8 = 0;
+//     let mut best_move: Move = Move::Left;
+//     for m in MOVES {
+//         let new_game = execute_move(game, m);
+//         let open_tiles = get_open_tiles(new_game);
+//         for i in open_tiles {
+//             let mut possible_game = new_game;
+//             possible_game[i] = 1;
+//             let (score, _) = search(new_game, depth - 1);
+//             if score > best_score {
+//                 best_score = score;
+//                 best_move = m;
+//             }
+//         }
+//     }
+//     (best_score, best_move)
+// }
+
+// fn score_game(game: u64) -> u8 {
+//     let mut score: u8 = 0;
+//     for i in 0..16 {
+//         let value = game[i];
+//         if value != 0 {
+//             score += value;
+//         }
+//     }
+//     score
+// }
 
 fn main() {
-    let mut game: Game = [0; 16];
-    game = insert_random_tile(game);
-    game = insert_random_tile(game);
-    print_game_state(game);
-    loop {
-        let (_, best_move) = search(game, 4);
-        game = execute_move(game, best_move);
-        game = insert_random_tile(game);
-        print_game_state(game);
-    }
+    let mut game: Game = Game {
+        left_table: &mut [0; 65536],
+        right_table: &mut [0; 65536],
+        up_table: &mut [0; 65536],
+        down_table: &mut [0; 65536]
+    };
+    let mut board: u64 = 0;
+    game.fill_transition_tables();
+    board = insert_random_tile(board);
+    board = insert_random_tile(board);
+    print_game_state(board);
     // loop {
-    //     // Wait for input from the user.
-    //     let mut input = String::new();
-    //     print!("Next move: ");
-    //     io::stdout().flush().unwrap();
-    //     io::stdin().read_line(&mut input).unwrap();
-    //     // Update the game state.
-    //     match input.trim() {
-    //         "a" => game = execute_move(game, Move::Left),
-    //         "w" => game = execute_move(game, Move::Up),
-    //         "s" => game = execute_move(game, Move::Down),
-    //         "d" => game = execute_move(game, Move::Right),
-    //         _ => println!("Invalid move.")
-    //     }
-    //     // Insert a new tile.
+    //     let (_, best_move) = search(game, 4);
+    //     game = execute_move(game, best_move);
     //     game = insert_random_tile(game);
-    //     // Print the game state.
     //     print_game_state(game);
     // }
+    loop {
+        // Wait for input from the user.
+        let mut input = String::new();
+        print!("Next move: ");
+        io::stdout().flush().unwrap();
+        io::stdin().read_line(&mut input).unwrap();
+        // Update the game state.
+        match input.trim() {
+            "a" => board = game.execute_move(board, Move::Left),
+            "d" => board = game.execute_move(board, Move::Right),
+            "w" => board = game.execute_move(board, Move::Up),
+            "s" => board = game.execute_move(board, Move::Down),
+            _ => println!("Invalid move.")
+        }
+        // Insert a new tile.
+        board= insert_random_tile(board);
+        // Print the game state.
+        print_game_state(board);
+    }
 }
