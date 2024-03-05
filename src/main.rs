@@ -142,40 +142,39 @@ impl Game<'_> {
         }
     }
 
+    fn search(&self, game: u64, depth: u8) -> (u64, Move) {
+        if depth == 0 {
+            return (score_game(game), Move::Up);
+        }
+        let mut best_score: u64 = 0;
+        let mut best_move: Move = Move::Left;
+        for m in MOVES {
+            let new_game = self.execute_move(game, m);
+            let open_tiles = get_open_tiles(new_game);
+            for i in open_tiles {
+                let (score, _) = self.search(new_game, depth - 1);
+                if score > best_score {
+                    best_score = score;
+                    best_move = m;
+                }
+            }
+        }
+        (best_score, best_move)
+    }
+
 }
 
-// fn search(game: u64, depth: u8) -> (u8, Move) {
-//     if depth == 0 {
-//         return (score_game(game), Move::Up);
-//     }
-//     let mut best_score: u8 = 0;
-//     let mut best_move: Move = Move::Left;
-//     for m in MOVES {
-//         let new_game = execute_move(game, m);
-//         let open_tiles = get_open_tiles(new_game);
-//         for i in open_tiles {
-//             let mut possible_game = new_game;
-//             possible_game[i] = 1;
-//             let (score, _) = search(new_game, depth - 1);
-//             if score > best_score {
-//                 best_score = score;
-//                 best_move = m;
-//             }
-//         }
-//     }
-//     (best_score, best_move)
-// }
 
-// fn score_game(game: u64) -> u8 {
-//     let mut score: u8 = 0;
-//     for i in 0..16 {
-//         let value = game[i];
-//         if value != 0 {
-//             score += value;
-//         }
-//     }
-//     score
-// }
+fn score_game(game: u64) -> u64 {
+    let mut score: u64 = 0;
+    for i in 0..16 {
+        let value = game >> (4 * i) & 0xF;
+        if value != 0 {
+            score += value;
+        }
+    }
+    score
+}
 
 fn main() {
     let mut game: Game = Game {
@@ -189,29 +188,29 @@ fn main() {
     board = insert_random_tile(board);
     board = insert_random_tile(board);
     print_game_state(board);
-    // loop {
-    //     let (_, best_move) = search(game, 4);
-    //     game = execute_move(game, best_move);
-    //     game = insert_random_tile(game);
-    //     print_game_state(game);
-    // }
     loop {
-        // Wait for input from the user.
-        let mut input = String::new();
-        print!("Next move: ");
-        io::stdout().flush().unwrap();
-        io::stdin().read_line(&mut input).unwrap();
-        // Update the game state.
-        match input.trim() {
-            "a" => board = game.execute_move(board, Move::Left),
-            "d" => board = game.execute_move(board, Move::Right),
-            "w" => board = game.execute_move(board, Move::Up),
-            "s" => board = game.execute_move(board, Move::Down),
-            _ => println!("Invalid move.")
-        }
-        // Insert a new tile.
-        board= insert_random_tile(board);
-        // Print the game state.
+        let (_, best_move) = game.search(board, 5);
+        board = game.execute_move(board, best_move);
+        board = insert_random_tile(board);
         print_game_state(board);
     }
+    // loop {
+    //     // Wait for input from the user.
+    //     let mut input = String::new();
+    //     print!("Next move: ");
+    //     io::stdout().flush().unwrap();
+    //     io::stdin().read_line(&mut input).unwrap();
+    //     // Update the game state.
+    //     match input.trim() {
+    //         "a" => board = game.execute_move(board, Move::Left),
+    //         "d" => board = game.execute_move(board, Move::Right),
+    //         "w" => board = game.execute_move(board, Move::Up),
+    //         "s" => board = game.execute_move(board, Move::Down),
+    //         _ => println!("Invalid move.")
+    //     }
+    //     // Insert a new tile.
+    //     board= insert_random_tile(board);
+    //     // Print the game state.
+    //     print_game_state(board);
+    // }
 }
