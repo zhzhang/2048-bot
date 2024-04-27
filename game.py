@@ -1,6 +1,7 @@
-from copy import deepcopy
-from enum import Enum
 import random
+from enum import Enum
+
+import numpy as np
 
 
 class Move(Enum):
@@ -10,90 +11,110 @@ class Move(Enum):
     DOWN = 3
 
 
-class Game:
-    def __init__(self):
-        self.state = [0 for _ in range(16)]
-        self.add_random_tile()
-        self.add_random_tile()
+class IllegalMove(Exception):
+    pass
 
-    def add_random_tile(self):
-        value = 2 if random.random() < 0.9 else 4
-        empty = []
-        for i, v in enumerate(self.state):
-            if v == 0:
-                empty.append(i)
-        cell_index = random.choice(empty)
-        self.state[cell_index] = value
 
-    def move(self, move: Move):
-        start, step, next_row = 0, 1, 4
-        if move == Move.RIGHT:
-            start, step, next_row = 15, -1, -4
-        elif move == Move.UP:
-            start, step, next_row = 0, 4, 1
-        elif move == Move.DOWN:
-            start, step, next_row = 15, -4, -1
-        for _ in range(4):
-            new = []
-            last_val = 0
-            for index in range(start, start + 4 * step, step):
-                val = self.state[index]
-                if val == 0:
-                    continue
-                if len(new) == 0:
+def init_board():
+    board = np.zeros((4, 4), dtype=int)
+    add_random_tile(board)
+    add_random_tile(board)
+    return board
+
+
+def add_random_tile(board):
+    value = 2 if random.random() < 0.9 else 4
+    empty = np.transpose((board == 0).nonzero())
+    cell_index = random.choice(empty)
+    board[cell_index[0], cell_index[1]] = value
+
+
+def move(board, move: Move):
+    new_board = []
+    if move == Move.RIGHT:
+        board = np.flip(board, 1)
+    elif move == Move.UP:
+        board = np.transpose(board)
+    elif move == Move.DOWN:
+        board = np.flip(np.transpose(board), 1)
+    for i in range(4):
+        new = []
+        last_val = 0
+        for j in range(4):
+            val = board[i, j]
+            if val == 0:
+                continue
+            if len(new) == 0:
+                new.append(val)
+                last_val = val
+            else:
+                if val == last_val:
+                    new[-1] *= 2
+                    last_val = 0
+                else:
                     new.append(val)
                     last_val = val
-                else:
-                    if val == last_val:
-                        new[-1] *= 2
-                        last_val = 0
-                    else:
-                        new.append(val)
-                        last_val = val
-            while len(new) < 4:
-                new.append(0)
-            for index in range(start, start + 4 * step, step):
-                self.state[index] = new.pop(0)
-            start += next_row
-        self.add_random_tile()
+        while len(new) < 4:
+            new.append(0)
+        new_board.append(new)
+    new_board = np.array(new_board)
+    if (board == new_board).all():
+        raise IllegalMove()
+    if move == Move.RIGHT:
+        new_board = np.flip(new_board, 1)
+    elif move == Move.UP:
+        new_board = np.transpose(new_board)
+    elif move == Move.DOWN:
+        new_board = np.transpose(np.flip(new_board, 1))
+    add_random_tile(new_board)
+    return new_board
 
-    def __str__(self):
-        out = ""
-        for i in range(4):
-            for j in range(4):
-                num = str(self.state[i * 4 + j])
-                while len(num) < 4:
-                    num = " " + num
-                out += num + "  "
-            out += "\n"
-        return out
+
+def print_board(board):
+    out = ""
+    for i in range(4):
+        for j in range(4):
+            num = str(board[i, j])
+            while len(num) < 4:
+                num = " " + num
+            out += num + "  "
+        out += "\n"
+    print(out)
 
 
 class Agent:
     def __init__(self):
-        self.game = Game()
+        self.board = init_board()
         pass
 
     def get_next_move():
         pass
 
+    def get_ntuples(self):
+        ntuples = [
+            [[0, 0], [0, 1], [0, 2], [1, 0], [1, 1], [1, 2]],
+            [[0, 0], [0, 1], [1, 1], [1, 2], [2, 1], [3, 2]],
+            [[0, 0], [0, 1], [0, 2], [0, 3], [1, 1], [1, 2]],
+            [[0, 0], [0, 1], [1, 1], [1, 2], [1, 3], [2, 2]],
+        ]
+        pass
+
 
 if __name__ == "__main__":
-    game = Game()
-    print(game)
+    board = init_board()
+    print_board(board)
     while True:
         # Wait for user input:
         print("Next move:")
         key = input()
         if key == "w":
-            game.move(Move.UP)
+            board = move(board, Move.UP)
         elif key == "s":
-            game.move(Move.DOWN)
+            board = move(board, Move.DOWN)
         elif key == "a":
-            game.move(Move.LEFT)
+            board = move(board, Move.LEFT)
         elif key == "d":
-            game.move(Move.RIGHT)
+            board = move(board, Move.RIGHT)
         else:
             break
-        print(game)
-        print(game.state)
+        print_board(board)
