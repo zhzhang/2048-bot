@@ -1,26 +1,33 @@
 // Implement taken from https://github.com/nneonneo/2048-ai and translated to Rust.
+use rand::{seq::IteratorRandom, thread_rng, Rng};
 use std::io::{self, Write};
-use rand::{seq::IteratorRandom, Rng, thread_rng};
+use std::time::{Duration, SystemTime};
 
 #[derive(Copy, Clone)]
 enum Move {
     Left,
     Right,
     Up,
-    Down
+    Down,
 }
 
 struct Game<'a> {
     left_table: &'a mut [u64; 65536],
     right_table: &'a mut [u64; 65536],
     up_table: &'a mut [u64; 65536],
-    down_table: &'a mut [u64; 65536]
+    down_table: &'a mut [u64; 65536],
 }
 
 static MOVES: [Move; 4] = [Move::Left, Move::Right, Move::Up, Move::Down];
 static ROW_MASK: u64 = 0xFFFF;
 static COL_MASK: u64 = 0x000F000F000F000F;
 
+static NTUPLE_MASKS: [u64; 4] = [
+    0xFFF0FFF000000000,
+    0x0FF00FF00F000F00,
+    0xFFFFFF0000000000,
+    0xFF000FFF00F00000,
+];
 
 fn random_tile_value() -> u8 {
     let mut rng = rand::thread_rng();
@@ -32,9 +39,11 @@ fn random_tile_value() -> u8 {
     }
 }
 
-
-fn insert_random_tile(board: u64) -> u64{
+fn insert_random_tile(board: u64) -> u64 {
     let open_tiles = get_open_tiles(board);
+    if (open_tiles.len() == 0) {
+        return board;
+    }
     // Randomly pick an open tile:
     let mut rng = thread_rng();
     let i = open_tiles.iter().choose(&mut rng).unwrap();
@@ -53,17 +62,16 @@ fn get_open_tiles(board: u64) -> Vec<usize> {
     open_tiles
 }
 
-
 fn reverse_line_repr(line_repr: u64) -> u64 {
     // Print bits.
     let mut reversed: u64 = 0;
-    ((line_repr >> 12) | ((line_repr >> 4) & 0xF0) | ((line_repr << 4) & 0xF00) | (line_repr << 12)) & ROW_MASK
+    ((line_repr >> 12) | ((line_repr >> 4) & 0xF0) | ((line_repr << 4) & 0xF00) | (line_repr << 12))
+        & ROW_MASK
 }
 
 fn unpack_col(row: u64) -> u64 {
     (row | (row << 12) | (row << 24) | (row << 36)) & COL_MASK
 }
-
 
 fn transpose(board: u64) -> u64 {
     let a1 = board & 0xF0F00F0FF0F00F0F;
@@ -120,25 +128,43 @@ impl Game<'_> {
                 new_line_repr |= (*value as u64) << (4 * i);
             }
             self.left_table[line_repr as usize] = new_line_repr;
-            self.right_table[reverse_line_repr(line_repr.into()) as usize] = reverse_line_repr(new_line_repr);
+            self.right_table[reverse_line_repr(line_repr.into()) as usize] =
+                reverse_line_repr(new_line_repr);
             self.up_table[line_repr as usize] = unpack_col(new_line_repr);
-            self.down_table[reverse_line_repr(line_repr.into()) as usize] = unpack_col(reverse_line_repr(new_line_repr));
+            self.down_table[reverse_line_repr(line_repr.into()) as usize] =
+                unpack_col(reverse_line_repr(new_line_repr));
         }
     }
 
     fn execute_move(&self, board: u64, m: Move) -> u64 {
-        match m{
-            Move::Left => self.left_table[(board & ROW_MASK) as usize] | (self.left_table[(board >> 16 & ROW_MASK) as usize] << 16) | (self.left_table[(board >> 32 & ROW_MASK) as usize] << 32) | (self.left_table[(board >> 48 & ROW_MASK) as usize] << 48),
-            Move::Right => self.right_table[(board & ROW_MASK) as usize] | (self.right_table[(board >> 16 & ROW_MASK) as usize] << 16) | (self.right_table[(board >> 32 & ROW_MASK) as usize] << 32) | (self.right_table[(board >> 48 & ROW_MASK) as usize] << 48),
+        match m {
+            Move::Left => {
+                self.left_table[(board & ROW_MASK) as usize]
+                    | (self.left_table[(board >> 16 & ROW_MASK) as usize] << 16)
+                    | (self.left_table[(board >> 32 & ROW_MASK) as usize] << 32)
+                    | (self.left_table[(board >> 48 & ROW_MASK) as usize] << 48)
+            }
+            Move::Right => {
+                self.right_table[(board & ROW_MASK) as usize]
+                    | (self.right_table[(board >> 16 & ROW_MASK) as usize] << 16)
+                    | (self.right_table[(board >> 32 & ROW_MASK) as usize] << 32)
+                    | (self.right_table[(board >> 48 & ROW_MASK) as usize] << 48)
+            }
             Move::Up => {
                 let tboard = transpose(board);
-                self.up_table[(tboard & ROW_MASK) as usize] | (self.up_table[(tboard >> 16 & ROW_MASK) as usize] << 4) | (self.up_table[(tboard >> 32 & ROW_MASK) as usize] << 8) | (self.up_table[(tboard >> 48 & ROW_MASK) as usize] << 12)
-            },
+                self.up_table[(tboard & ROW_MASK) as usize]
+                    | (self.up_table[(tboard >> 16 & ROW_MASK) as usize] << 4)
+                    | (self.up_table[(tboard >> 32 & ROW_MASK) as usize] << 8)
+                    | (self.up_table[(tboard >> 48 & ROW_MASK) as usize] << 12)
+            }
             Move::Down => {
                 let tboard = transpose(board);
-                self.down_table[(tboard & ROW_MASK) as usize] | (self.down_table[(tboard >> 16 & ROW_MASK) as usize] << 4) | (self.down_table[(tboard >> 32 & ROW_MASK) as usize] << 8) | (self.down_table[(tboard >> 48 & ROW_MASK) as usize] << 12)
-            },
-            _ => board
+                self.down_table[(tboard & ROW_MASK) as usize]
+                    | (self.down_table[(tboard >> 16 & ROW_MASK) as usize] << 4)
+                    | (self.down_table[(tboard >> 32 & ROW_MASK) as usize] << 8)
+                    | (self.down_table[(tboard >> 48 & ROW_MASK) as usize] << 12)
+            }
+            _ => board,
         }
     }
 
@@ -150,20 +176,11 @@ impl Game<'_> {
         let mut best_move: Move = Move::Left;
         for m in MOVES {
             let new_game = self.execute_move(game, m);
-            let open_tiles = get_open_tiles(new_game);
-            for i in open_tiles {
-                let (score, _) = self.search(new_game, depth - 1);
-                if score > best_score {
-                    best_score = score;
-                    best_move = m;
-                }
-            }
+            best_move = m;
         }
         (best_score, best_move)
     }
-
 }
-
 
 fn score_game(game: u64) -> u64 {
     let mut score: u64 = 0;
@@ -181,18 +198,26 @@ fn main() {
         left_table: &mut [0; 65536],
         right_table: &mut [0; 65536],
         up_table: &mut [0; 65536],
-        down_table: &mut [0; 65536]
+        down_table: &mut [0; 65536],
     };
-    let mut board: u64 = 0;
-    game.fill_transition_tables();
-    board = insert_random_tile(board);
-    board = insert_random_tile(board);
-    print_game_state(board);
+    let mut start: SystemTime = SystemTime::now();
+    let mut count: u32 = 0;
     loop {
-        let (_, best_move) = game.search(board, 5);
-        board = game.execute_move(board, best_move);
+        let mut board: u64 = 0;
+        game.fill_transition_tables();
         board = insert_random_tile(board);
-        print_game_state(board);
+        board = insert_random_tile(board);
+        loop {
+            count += 1;
+            let (_, best_move) = game.search(board, 5);
+            board = game.execute_move(board, best_move);
+            board = insert_random_tile(board);
+            if (count % 10000 == 0) {
+                let elapsed = start.elapsed().unwrap();
+                println!("Time: {:?}", elapsed);
+                start = SystemTime::now();
+            }
+        }
     }
     // loop {
     //     // Wait for input from the user.
