@@ -1,6 +1,7 @@
 // Board implementation taken from https://github.com/nneonneo/2048-ai and translated to Rust.
 use rand::{seq::IteratorRandom, thread_rng, Rng};
 
+use std::thread;
 use std::time::SystemTime;
 
 #[derive(Copy, Clone)]
@@ -25,6 +26,10 @@ struct Game<'a> {
     ntuple_values_2: Box<[f32]>,
     ntuple_values_3: Box<[f32]>,
     ntuple_values_4: Box<[f32]>,
+    ntuple_values_5: Box<[f32]>,
+    ntuple_values_6: Box<[f32]>,
+    ntuple_values_7: Box<[f32]>,
+    ntuple_values_8: Box<[f32]>,
 }
 
 static MOVES: [Move; 4] = [Move::Left, Move::Right, Move::Up, Move::Down];
@@ -55,6 +60,31 @@ fn ntuple_mask_3(board: u64) -> u64 {
 
 fn ntuple_mask_4(board: u64) -> u64 {
     ((board >> 20) & 0xF) | ((board >> 24) & 0xFFF0) | ((board >> 40) & 0xFF0000)
+}
+
+fn ntuple_mask_5(board: u64) -> u64 {
+    ((board >> 20) & 0xFF) | ((board >> 32) & 0xF00) | ((board >> 40) & 0xFFF000)
+}
+
+fn ntuple_mask_6(board: u64) -> u64 {
+    ((board >> 4) & 0xFF)
+        | ((board >> 16) & 0xF00)
+        | ((board >> 28) & 0xF000)
+        | ((board >> 40) & 0xFF0000)
+}
+
+fn ntuple_mask_7(board: u64) -> u64 {
+    ((board >> 8) & 0xF)
+        | ((board >> 20) & 0xFF0)
+        | ((board >> 28) & 0xF000)
+        | ((board >> 40) & 0xFF0000)
+}
+
+fn ntuple_mask_8(board: u64) -> u64 {
+    ((board >> 20) & 0xF)
+        | ((board >> 32) & 0xF0)
+        | ((board >> 36) & 0xF00)
+        | ((board >> 40) & 0xFFF000)
 }
 
 fn get_ntuples<F>(board: u64, mask_fn: F, values: &Box<[f32]>) -> ([u64; 8], f32)
@@ -253,13 +283,18 @@ impl Game<'_> {
     }
 
     fn search(&mut self, board: u64) -> (u64, bool) {
-        let mut best_value: f32 = 0.0;
+        let mut best_value: f32 = f32::NEG_INFINITY;
         let mut best_board: u64 = 0;
         let (ntuples1, values1) = get_ntuples(board, ntuple_mask_1, &self.ntuple_values_1);
         let (ntuples2, values2) = get_ntuples(board, ntuple_mask_2, &self.ntuple_values_2);
         let (ntuples3, values3) = get_ntuples(board, ntuple_mask_3, &self.ntuple_values_3);
         let (ntuples4, values4) = get_ntuples(board, ntuple_mask_4, &self.ntuple_values_4);
-        let current_value = values1 + values2 + values3 + values4;
+        let (ntuples5, values5) = get_ntuples(board, ntuple_mask_5, &self.ntuple_values_5);
+        let (ntuples6, values6) = get_ntuples(board, ntuple_mask_6, &self.ntuple_values_6);
+        let (ntuples7, values7) = get_ntuples(board, ntuple_mask_7, &self.ntuple_values_7);
+        let (ntuples8, values8) = get_ntuples(board, ntuple_mask_8, &self.ntuple_values_8);
+        let current_value =
+            values1 + values2 + values3 + values4 + values5 + values6 + values7 + values8;
         let mut best_move_reward: u64 = 0;
         for m in MOVES {
             let (mut new_board, reward) = self.execute_move(board, m);
@@ -271,7 +306,19 @@ impl Game<'_> {
             let (_, values2) = get_ntuples(new_board, ntuple_mask_2, &self.ntuple_values_2);
             let (_, values3) = get_ntuples(new_board, ntuple_mask_3, &self.ntuple_values_3);
             let (_, values4) = get_ntuples(new_board, ntuple_mask_4, &self.ntuple_values_4);
-            let next_state_value = values1 + values2 + values3 + values4 + reward as f32;
+            let (_, values5) = get_ntuples(new_board, ntuple_mask_5, &self.ntuple_values_5);
+            let (_, values6) = get_ntuples(new_board, ntuple_mask_6, &self.ntuple_values_6);
+            let (_, values7) = get_ntuples(new_board, ntuple_mask_7, &self.ntuple_values_7);
+            let (_, values8) = get_ntuples(new_board, ntuple_mask_8, &self.ntuple_values_8);
+            let next_state_value = values1
+                + values2
+                + values3
+                + values4
+                + values5
+                + values6
+                + values7
+                + values8
+                + reward as f32;
             if next_state_value > best_value {
                 best_value = next_state_value;
                 best_board = new_board;
@@ -284,16 +331,28 @@ impl Game<'_> {
         self.score += best_move_reward;
         let delta = best_value - current_value;
         for ntuple in ntuples1.iter() {
-            self.ntuple_values_1[*ntuple as usize] += 0.1 * delta / (4.0 * 8.0);
+            self.ntuple_values_1[*ntuple as usize] += 0.1 * delta / (8.0 * 8.0);
         }
         for ntuple in ntuples2.iter() {
-            self.ntuple_values_2[*ntuple as usize] += 0.1 * delta / (4.0 * 8.0);
+            self.ntuple_values_2[*ntuple as usize] += 0.1 * delta / (8.0 * 8.0);
         }
         for ntuple in ntuples3.iter() {
-            self.ntuple_values_3[*ntuple as usize] += 0.1 * delta / (4.0 * 8.0);
+            self.ntuple_values_3[*ntuple as usize] += 0.1 * delta / (8.0 * 8.0);
         }
         for ntuple in ntuples4.iter() {
-            self.ntuple_values_4[*ntuple as usize] += 0.1 * delta / (4.0 * 8.0);
+            self.ntuple_values_4[*ntuple as usize] += 0.1 * delta / (8.0 * 8.0);
+        }
+        for ntuple in ntuples5.iter() {
+            self.ntuple_values_5[*ntuple as usize] += 0.1 * delta / (8.0 * 8.0);
+        }
+        for ntuple in ntuples6.iter() {
+            self.ntuple_values_6[*ntuple as usize] += 0.1 * delta / (8.0 * 8.0);
+        }
+        for ntuple in ntuples7.iter() {
+            self.ntuple_values_7[*ntuple as usize] += 0.1 * delta / (8.0 * 8.0);
+        }
+        for ntuple in ntuples8.iter() {
+            self.ntuple_values_8[*ntuple as usize] += 0.1 * delta / (8.0 * 8.0);
         }
         (best_board, false)
     }
@@ -314,6 +373,10 @@ fn main() {
         ntuple_values_2: vec![0.0; 16777216].into_boxed_slice(),
         ntuple_values_3: vec![0.0; 16777216].into_boxed_slice(),
         ntuple_values_4: vec![0.0; 16777216].into_boxed_slice(),
+        ntuple_values_5: vec![0.0; 16777216].into_boxed_slice(),
+        ntuple_values_6: vec![0.0; 16777216].into_boxed_slice(),
+        ntuple_values_7: vec![0.0; 16777216].into_boxed_slice(),
+        ntuple_values_8: vec![0.0; 16777216].into_boxed_slice(),
     };
     let mut start: SystemTime = SystemTime::now();
     let mut count: u32 = 0;
