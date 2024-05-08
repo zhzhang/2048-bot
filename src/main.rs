@@ -44,7 +44,7 @@ static COL_MASK: u64 = 0x000F000F000F000F;
 // ];
 
 fn ntuple_mask_1(board: u64) -> u64 {
-    ((board >> 36) & 0xFFF) | ((board >> 48) & 0xFFF000)
+    ((board >> 36) & 0xFFF) | ((board >> 40) & 0xFFF000)
 }
 
 fn ntuple_mask_2(board: u64) -> u64 {
@@ -59,7 +59,7 @@ fn ntuple_mask_3(board: u64) -> u64 {
 }
 
 fn ntuple_mask_4(board: u64) -> u64 {
-    ((board >> 20) & 0xF) | ((board >> 24) & 0xFFF0) | ((board >> 40) & 0xFF0000)
+    ((board >> 20) & 0xF) | ((board >> 28) & 0xFFF0) | ((board >> 40) & 0xFF0000)
 }
 
 fn ntuple_mask_5(board: u64) -> u64 {
@@ -92,16 +92,16 @@ where
     F: Fn(u64) -> u64,
 {
     let ntuples = [
-        mask_fn(board),                                            // 0
-        mask_fn(transpose(board)),                                 // 0
-        mask_fn(fliph(board)),                                     // 1
-        mask_fn(fliph(transpose(board))),                          // 1
-        mask_fn(transpose(fliph(board))),                          // 2
-        mask_fn(fliph(transpose(fliph(transpose(fliph(board)))))), // 2
-        mask_fn(fliph(transpose(fliph(board)))),                   // 3
-        mask_fn(transpose(fliph(transpose(fliph(board))))),        // 3
+        mask_fn(board),
+        mask_fn(transpose(board)),
+        mask_fn(fliph(board)),
+        mask_fn(transpose(fliph(board))),
+        mask_fn(flipv(board)),
+        mask_fn(transpose(flipv(board))),
+        mask_fn(fliph(flipv(board))),            // 3+
+        mask_fn(transpose(fliph(flipv(board)))), // 3-
     ];
-    let values = [
+    let ntuple_values = [
         values[ntuples[0] as usize],
         values[ntuples[1] as usize],
         values[ntuples[2] as usize],
@@ -111,7 +111,7 @@ where
         values[ntuples[6] as usize],
         values[ntuples[7] as usize],
     ];
-    (ntuples, values.into_iter().sum())
+    (ntuples, ntuple_values.into_iter().sum())
 }
 
 fn random_tile_value() -> u8 {
@@ -157,6 +157,13 @@ fn fliph(board: u64) -> u64 {
         | ((board & 0x00F000F000F000F0) << 4)
         | ((board & 0x0F000F000F000F00) >> 4)
         | ((board & 0xF000F000F000F000) >> 12)
+}
+
+fn flipv(board: u64) -> u64 {
+    ((board & 0xFFFF000000000000) >> 48)
+        | ((board & 0x0000FFFF00000000) >> 16)
+        | ((board & 0x00000000FFFF0000) << 16)
+        | ((board & 0x000000000000FFFF) << 48)
 }
 
 fn unpack_col(row: u64) -> u64 {
@@ -331,30 +338,128 @@ impl Game<'_> {
         self.score += best_move_reward;
         let delta = best_value - current_value;
         for ntuple in ntuples1.iter() {
-            self.ntuple_values_1[*ntuple as usize] += 0.1 * delta / (8.0 * 8.0);
+            self.ntuple_values_1[*ntuple as usize] += 0.1 * delta / 64.0;
         }
         for ntuple in ntuples2.iter() {
-            self.ntuple_values_2[*ntuple as usize] += 0.1 * delta / (8.0 * 8.0);
+            self.ntuple_values_2[*ntuple as usize] += 0.1 * delta / 64.0;
         }
         for ntuple in ntuples3.iter() {
-            self.ntuple_values_3[*ntuple as usize] += 0.1 * delta / (8.0 * 8.0);
+            self.ntuple_values_3[*ntuple as usize] += 0.1 * delta / 64.0;
         }
         for ntuple in ntuples4.iter() {
-            self.ntuple_values_4[*ntuple as usize] += 0.1 * delta / (8.0 * 8.0);
+            self.ntuple_values_4[*ntuple as usize] += 0.1 * delta / 64.0;
         }
         for ntuple in ntuples5.iter() {
-            self.ntuple_values_5[*ntuple as usize] += 0.1 * delta / (8.0 * 8.0);
+            self.ntuple_values_5[*ntuple as usize] += 0.1 * delta / 64.0;
         }
         for ntuple in ntuples6.iter() {
-            self.ntuple_values_6[*ntuple as usize] += 0.1 * delta / (8.0 * 8.0);
+            self.ntuple_values_6[*ntuple as usize] += 0.1 * delta / 64.0;
         }
         for ntuple in ntuples7.iter() {
-            self.ntuple_values_7[*ntuple as usize] += 0.1 * delta / (8.0 * 8.0);
+            self.ntuple_values_7[*ntuple as usize] += 0.1 * delta / 64.0;
         }
         for ntuple in ntuples8.iter() {
-            self.ntuple_values_8[*ntuple as usize] += 0.1 * delta / (8.0 * 8.0);
+            self.ntuple_values_8[*ntuple as usize] += 0.1 * delta / 64.0;
         }
         (best_board, false)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    const TEST_BOARD: u64 = 0x0123456789ABCDEF;
+
+    fn board_from_row_values(values: [u8; 16]) -> u64 {
+        let mut board: u64 = 0;
+        for i in 0..16 {
+            board |= (values[i] as u64) << (4 * (15 - i));
+        }
+        board
+    }
+
+    fn ntuple_mask_from_values(values: [u8; 6]) -> u64 {
+        let mut mask: u64 = 0;
+        for i in 0..6 {
+            mask |= (values[i] as u64) << (4 * (5 - i));
+        }
+        mask
+    }
+
+    fn print_ntuple(mask: u64) {
+        for i in 0..6 {
+            print!("{:5}", ((mask >> (4 * (5 - i))) & 0xF));
+        }
+        println!();
+    }
+
+    #[test]
+    fn test_ntuple_masks() {
+        let test_values: [(fn(u64) -> u64, [u8; 6]); 8] = [
+            (ntuple_mask_1, [0, 1, 2, 4, 5, 6]),
+            (ntuple_mask_2, [1, 2, 5, 6, 9, 13]),
+            (ntuple_mask_3, [0, 1, 2, 3, 4, 5]),
+            (ntuple_mask_4, [0, 1, 5, 6, 7, 10]),
+            (ntuple_mask_5, [0, 1, 2, 5, 9, 10]),
+            (ntuple_mask_6, [0, 1, 5, 9, 13, 14]),
+            (ntuple_mask_7, [0, 1, 5, 8, 9, 13]),
+            (ntuple_mask_8, [0, 1, 2, 4, 6, 10]),
+        ];
+        for (i, (mask_fn, result)) in test_values.into_iter().enumerate() {
+            let ntuple = mask_fn(TEST_BOARD);
+            let true_ntuple = ntuple_mask_from_values(result);
+            if ntuple != true_ntuple {
+                println!("Test failed for mask: {}", i + 1);
+                print_ntuple(ntuple);
+                print_ntuple(true_ntuple);
+            }
+            assert_eq!(ntuple, true_ntuple);
+        }
+    }
+
+    #[test]
+    fn test_fliph_board() {
+        let fliph_board = fliph(TEST_BOARD);
+        let true_fliph_board: u64 =
+            board_from_row_values([3, 2, 1, 0, 7, 6, 5, 4, 11, 10, 9, 8, 15, 14, 13, 12]);
+        assert_eq!(fliph_board, true_fliph_board);
+    }
+
+    #[test]
+    fn test_flipv_board() {
+        let flipv_board = flipv(TEST_BOARD);
+        let true_flipv_board: u64 =
+            board_from_row_values([12, 13, 14, 15, 8, 9, 10, 11, 4, 5, 6, 7, 0, 1, 2, 3]);
+        assert_eq!(flipv_board, true_flipv_board);
+    }
+
+    #[test]
+    fn test_transpose_board() {
+        let transposed_board = transpose(TEST_BOARD);
+        let true_transposed_board: u64 =
+            board_from_row_values([0, 4, 8, 12, 1, 5, 9, 13, 2, 6, 10, 14, 3, 7, 11, 15]);
+        assert_eq!(transposed_board, true_transposed_board);
+    }
+
+    #[test]
+    fn test_get_ntuples() {
+        let ntuple_values_1 = vec![0.0; 16777216].into_boxed_slice();
+        let (ntuples1, values1) = get_ntuples(TEST_BOARD, ntuple_mask_1, &ntuple_values_1);
+        let true_ntuples1 = [
+            ntuple_mask_from_values([0, 1, 2, 4, 5, 6]),
+            ntuple_mask_from_values([0, 4, 8, 1, 5, 9]),
+            ntuple_mask_from_values([3, 2, 1, 7, 6, 5]),
+            ntuple_mask_from_values([3, 7, 11, 2, 6, 10]),
+        ];
+        for i in 0..4 {
+            if ntuples1[i] != true_ntuples1[i] {
+                println!("Test failed for ntuple: {}", i + 1);
+                print_ntuple(ntuples1[i]);
+                print_ntuple(true_ntuples1[i]);
+            }
+            assert_eq!(ntuples1[i], true_ntuples1[i]);
+        }
+        assert_eq!(values1, 0.0)
     }
 }
 
@@ -381,31 +486,29 @@ fn main() {
     let mut start: SystemTime = SystemTime::now();
     let mut count: u32 = 0;
     let mut best_score = 0;
+    let mut board: u64 = 0;
+    game.fill_transition_tables();
+    board = insert_random_tile(board);
+    board = insert_random_tile(board);
     loop {
-        let mut board: u64 = 0;
-        game.fill_transition_tables();
-        board = insert_random_tile(board);
-        board = insert_random_tile(board);
-        loop {
-            let (new_board, game_over) = game.search(board);
-            board = new_board;
-            if game_over {
-                count += 1;
-                if count % 1000 == 0 {
-                    print_game_state(board);
-                    let elapsed = start.elapsed().unwrap();
-                    println!(
-                        "Time: {:?} Games Played: {:?} Best Score: {:?}",
-                        elapsed, count, best_score
-                    );
-                    start = SystemTime::now();
-                }
-                best_score = best_score.max(game.score);
-                board = 0;
-                board = insert_random_tile(board);
-                board = insert_random_tile(board);
-                game.score = 0;
+        let (new_board, game_over) = game.search(board);
+        board = new_board;
+        if game_over {
+            count += 1;
+            if count % 10000 == 0 {
+                print_game_state(board);
+                let elapsed = start.elapsed().unwrap();
+                println!(
+                    "Time: {:?} Games Played: {:?} Best Score: {:?}",
+                    elapsed, count, best_score
+                );
+                start = SystemTime::now();
             }
+            best_score = best_score.max(game.score);
+            board = 0;
+            board = insert_random_tile(board);
+            board = insert_random_tile(board);
+            game.score = 0;
         }
     }
     // loop {
