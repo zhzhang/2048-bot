@@ -1,6 +1,10 @@
 // Board implementation taken from https://github.com/nneonneo/2048-ai and translated to Rust.
+#[macro_use]
+extern crate lazy_static;
+
 use rand::{seq::IteratorRandom, thread_rng, Rng};
 
+use std::iter::zip;
 use std::thread;
 use std::time::SystemTime;
 
@@ -12,36 +16,36 @@ enum Move {
     Down,
 }
 
-struct Game<'a> {
+const NTUPLE_MASKS_FNS: [fn(u64) -> u64; 8] = [
+    ntuple_mask_1,
+    ntuple_mask_2,
+    ntuple_mask_3,
+    ntuple_mask_4,
+    ntuple_mask_5,
+    ntuple_mask_6,
+    ntuple_mask_7,
+    ntuple_mask_8,
+];
+
+struct Agent {
     score: u64,
-    left_table: &'a mut [u64; 65536],
-    right_table: &'a mut [u64; 65536],
-    up_table: &'a mut [u64; 65536],
-    down_table: &'a mut [u64; 65536],
-    left_reward_table: &'a mut [u64; 65536],
-    right_reward_table: &'a mut [u64; 65536],
-    up_reward_table: &'a mut [u64; 65536],
-    down_reward_table: &'a mut [u64; 65536],
-    ntuple_values_1: Box<[f32]>,
-    ntuple_values_2: Box<[f32]>,
-    ntuple_values_3: Box<[f32]>,
-    ntuple_values_4: Box<[f32]>,
-    ntuple_values_5: Box<[f32]>,
-    ntuple_values_6: Box<[f32]>,
-    ntuple_values_7: Box<[f32]>,
-    ntuple_values_8: Box<[f32]>,
+    ntuple_values: [Vec<f32>; NTUPLE_MASKS_FNS.len()],
 }
 
-static MOVES: [Move; 4] = [Move::Left, Move::Right, Move::Up, Move::Down];
-static ROW_MASK: u64 = 0xFFFF;
-static COL_MASK: u64 = 0x000F000F000F000F;
+struct TransitionTable {
+    left_table: Vec<(u64, u64)>,
+    right_table: Vec<(u64, u64)>,
+    up_table: Vec<(u64, u64)>,
+    down_table: Vec<(u64, u64)>,
+}
 
-// static NTUPLE_MASKS: [u64; 4] = [
-//     0xFFF0FFF000000000,
-//     0x0FF00FF00F000F00,
-//     0xFFFFFF0000000000,
-//     0xFF000FFF00F00000,
-// ];
+lazy_static! {
+    static ref TTABLE: TransitionTable = generate_transition_tables();
+}
+
+const MOVES: [Move; 4] = [Move::Left, Move::Right, Move::Up, Move::Down];
+const ROW_MASK: u64 = 0xFFFF;
+const COL_MASK: u64 = 0x000F000F000F000F;
 
 fn ntuple_mask_1(board: u64) -> u64 {
     ((board >> 36) & 0xFFF) | ((board >> 40) & 0xFFF000)
@@ -87,10 +91,11 @@ fn ntuple_mask_8(board: u64) -> u64 {
         | ((board >> 40) & 0xFFF000)
 }
 
-fn get_ntuples<F>(board: u64, mask_fn: F, values: &Box<[f32]>) -> ([u64; 8], f32)
-where
-    F: Fn(u64) -> u64,
-{
+fn get_ntuples_for_mask_fn(
+    board: u64,
+    mask_fn: fn(u64) -> u64,
+    values: &Vec<f32>,
+) -> ([u64; 8], f32) {
     let ntuples = [
         mask_fn(board),
         mask_fn(transpose(board)),
@@ -98,8 +103,8 @@ where
         mask_fn(transpose(fliph(board))),
         mask_fn(flipv(board)),
         mask_fn(transpose(flipv(board))),
-        mask_fn(fliph(flipv(board))),            // 3+
-        mask_fn(transpose(fliph(flipv(board)))), // 3-
+        mask_fn(fliph(flipv(board))),
+        mask_fn(transpose(fliph(flipv(board)))),
     ];
     let ntuple_values = [
         values[ntuples[0] as usize],
@@ -195,173 +200,195 @@ fn print_game_state(board: u64) {
     }
 }
 
-impl Game<'_> {
-    fn fill_transition_tables(&mut self) {
-        for line_repr in 0..65536u64 {
-            let mut new_line: Vec<u64> = Vec::new();
-            let mut last_value: u64 = 0;
-            let mut reward: u64 = 0;
-            for position in 0..4 {
-                // println!("i: {}", i);
-                let value = line_repr >> (4 * position) & 0xF;
-                if value != 0 {
-                    if value == last_value {
-                        new_line.push(value + 1);
-                        reward += 1 << (value + 1);
-                        last_value = 0;
-                    } else {
-                        if last_value != 0 {
-                            new_line.push(last_value);
-                        }
-                        last_value = value;
+fn generate_transition_tables() -> TransitionTable {
+    println!("Generating transition tables.");
+    let mut left_table: Vec<(u64, u64)> = vec![(0, 0); 65536];
+    let mut right_table: Vec<(u64, u64)> = vec![(0, 0); 65536];
+    let mut up_table: Vec<(u64, u64)> = vec![(0, 0); 65536];
+    let mut down_table: Vec<(u64, u64)> = vec![(0, 0); 65536];
+    for line_repr in 0..65536u64 {
+        let mut new_line: Vec<u64> = Vec::new();
+        let mut last_value: u64 = 0;
+        let mut reward: u64 = 0;
+        for position in 0..4 {
+            // println!("i: {}", i);
+            let value = line_repr >> (4 * position) & 0xF;
+            if value != 0 {
+                if value == last_value {
+                    new_line.push(value + 1);
+                    reward += 1 << (value + 1);
+                    last_value = 0;
+                } else {
+                    if last_value != 0 {
+                        new_line.push(last_value);
                     }
+                    last_value = value;
                 }
-                // println!("line: {:?}", line);
             }
-            if last_value != 0 {
-                new_line.push(last_value);
-            }
-            let mut new_line_repr: u64 = 0;
-            for (i, value) in new_line.iter().enumerate() {
-                new_line_repr |= (*value as u64) << (4 * i);
-            }
-            self.left_table[line_repr as usize] = new_line_repr;
-            self.left_reward_table[line_repr as usize] = reward;
-            self.right_table[reverse_line_repr(line_repr.into()) as usize] =
-                reverse_line_repr(new_line_repr);
-            self.right_reward_table[reverse_line_repr(line_repr.into()) as usize] = reward;
-            self.up_table[line_repr as usize] = unpack_col(new_line_repr);
-            self.up_reward_table[line_repr as usize] = reward;
-            self.down_table[reverse_line_repr(line_repr.into()) as usize] =
-                unpack_col(reverse_line_repr(new_line_repr));
-            self.down_reward_table[reverse_line_repr(line_repr.into()) as usize] = reward;
+            // println!("line: {:?}", line);
+        }
+        if last_value != 0 {
+            new_line.push(last_value);
+        }
+        let mut new_line_repr: u64 = 0;
+        for (i, value) in new_line.iter().enumerate() {
+            new_line_repr |= (*value as u64) << (4 * i);
+        }
+        left_table[line_repr as usize] = (new_line_repr, reward);
+        right_table[reverse_line_repr(line_repr.into()) as usize] =
+            (reverse_line_repr(new_line_repr), reward);
+        up_table[line_repr as usize] = (unpack_col(new_line_repr), reward);
+        down_table[reverse_line_repr(line_repr.into()) as usize] =
+            (unpack_col(reverse_line_repr(new_line_repr)), reward);
+    }
+    TransitionTable {
+        left_table,
+        right_table,
+        up_table,
+        down_table,
+    }
+}
+
+fn execute_move(board: u64, m: Move) -> (u64, u64) {
+    match m {
+        Move::Left => {
+            //     | (self.left_table[(board >> 16 & ROW_MASK) as usize] << 16)
+            //     | (self.left_table[(board >> 32 & ROW_MASK) as usize] << 32)
+            //     | (self.left_table[(board >> 48 & ROW_MASK) as usize] << 48),
+            // self.left_reward_table[(board & ROW_MASK) as usize]
+            //     + self.left_reward_table[(board >> 16 & ROW_MASK) as usize]
+            //     + self.left_reward_table[(board >> 32 & ROW_MASK) as usize]
+            //     + self.left_reward_table[(board >> 48 & ROW_MASK) as usize],
+            let (x1, r1) = TTABLE.left_table[(board & ROW_MASK) as usize];
+            let (x2, r2) = TTABLE.left_table[(board >> 16 & ROW_MASK) as usize];
+            let (x3, r3) = TTABLE.left_table[(board >> 32 & ROW_MASK) as usize];
+            let (x4, r4) = TTABLE.left_table[(board >> 48 & ROW_MASK) as usize];
+            (x1 | (x2 << 16) | (x3 << 32) | (x4 << 48), r1 + r2 + r3 + r4)
+        }
+        Move::Right => {
+            // self.right_table[(board & ROW_MASK) as usize]
+            //     | (self.right_table[(board >> 16 & ROW_MASK) as usize] << 16)
+            //     | (self.right_table[(board >> 32 & ROW_MASK) as usize] << 32)
+            //     | (self.right_table[(board >> 48 & ROW_MASK) as usize] << 48),
+            // self.right_reward_table[(board & ROW_MASK) as usize]
+            //     + self.right_reward_table[(board >> 16 & ROW_MASK) as usize]
+            //     + self.right_reward_table[(board >> 32 & ROW_MASK) as usize]
+            //     + self.right_reward_table[(board >> 48 & ROW_MASK) as usize],
+            let (x1, r1) = TTABLE.right_table[(board & ROW_MASK) as usize];
+            let (x2, r2) = TTABLE.right_table[(board >> 16 & ROW_MASK) as usize];
+            let (x3, r3) = TTABLE.right_table[(board >> 32 & ROW_MASK) as usize];
+            let (x4, r4) = TTABLE.right_table[(board >> 48 & ROW_MASK) as usize];
+            (x1 | (x2 << 16) | (x3 << 32) | (x4 << 48), r1 + r2 + r3 + r4)
+        }
+        Move::Up => {
+            let tboard = transpose(board);
+            // (
+            //     self.up_table[(tboard & ROW_MASK) as usize]
+            //         | (self.up_table[(tboard >> 16 & ROW_MASK) as usize] << 4)
+            //         | (self.up_table[(tboard >> 32 & ROW_MASK) as usize] << 8)
+            //         | (self.up_table[(tboard >> 48 & ROW_MASK) as usize] << 12),
+            //     self.up_reward_table[(tboard & ROW_MASK) as usize]
+            //         + self.up_reward_table[(tboard >> 16 & ROW_MASK) as usize]
+            //         + self.up_reward_table[(tboard >> 32 & ROW_MASK) as usize]
+            //         + self.up_reward_table[(tboard >> 48 & ROW_MASK) as usize],
+            // )
+            let (x1, r1) = TTABLE.up_table[(tboard & ROW_MASK) as usize];
+            let (x2, r2) = TTABLE.up_table[(tboard >> 16 & ROW_MASK) as usize];
+            let (x3, r3) = TTABLE.up_table[(tboard >> 32 & ROW_MASK) as usize];
+            let (x4, r4) = TTABLE.up_table[(tboard >> 48 & ROW_MASK) as usize];
+            (x1 | (x2 << 4) | (x3 << 8) | (x4 << 12), r1 + r2 + r3 + r4)
+        }
+        Move::Down => {
+            let tboard = transpose(board);
+            // (
+            //     self.down_table[(tboard & ROW_MASK) as usize]
+            //         | (self.down_table[(tboard >> 16 & ROW_MASK) as usize] << 4)
+            //         | (self.down_table[(tboard >> 32 & ROW_MASK) as usize] << 8)
+            //         | (self.down_table[(tboard >> 48 & ROW_MASK) as usize] << 12),
+            //     self.down_reward_table[(tboard & ROW_MASK) as usize]
+            //         + self.down_reward_table[(tboard >> 16 & ROW_MASK) as usize]
+            //         + self.down_reward_table[(tboard >> 32 & ROW_MASK) as usize]
+            //         + self.down_reward_table[(tboard >> 48 & ROW_MASK) as usize],
+            // )
+            let (x1, r1) = TTABLE.down_table[(tboard & ROW_MASK) as usize];
+            let (x2, r2) = TTABLE.down_table[(tboard >> 16 & ROW_MASK) as usize];
+            let (x3, r3) = TTABLE.down_table[(tboard >> 32 & ROW_MASK) as usize];
+            let (x4, r4) = TTABLE.down_table[(tboard >> 48 & ROW_MASK) as usize];
+            (x1 | (x2 << 4) | (x3 << 8) | (x4 << 12), r1 + r2 + r3 + r4)
         }
     }
+}
 
-    fn execute_move(&self, board: u64, m: Move) -> (u64, u64) {
-        match m {
-            Move::Left => (
-                self.left_table[(board & ROW_MASK) as usize]
-                    | (self.left_table[(board >> 16 & ROW_MASK) as usize] << 16)
-                    | (self.left_table[(board >> 32 & ROW_MASK) as usize] << 32)
-                    | (self.left_table[(board >> 48 & ROW_MASK) as usize] << 48),
-                self.left_reward_table[(board & ROW_MASK) as usize]
-                    + self.left_reward_table[(board >> 16 & ROW_MASK) as usize]
-                    + self.left_reward_table[(board >> 32 & ROW_MASK) as usize]
-                    + self.left_reward_table[(board >> 48 & ROW_MASK) as usize],
-            ),
-            Move::Right => (
-                self.right_table[(board & ROW_MASK) as usize]
-                    | (self.right_table[(board >> 16 & ROW_MASK) as usize] << 16)
-                    | (self.right_table[(board >> 32 & ROW_MASK) as usize] << 32)
-                    | (self.right_table[(board >> 48 & ROW_MASK) as usize] << 48),
-                self.right_reward_table[(board & ROW_MASK) as usize]
-                    + self.right_reward_table[(board >> 16 & ROW_MASK) as usize]
-                    + self.right_reward_table[(board >> 32 & ROW_MASK) as usize]
-                    + self.right_reward_table[(board >> 48 & ROW_MASK) as usize],
-            ),
-            Move::Up => {
-                let tboard = transpose(board);
-                (
-                    self.up_table[(tboard & ROW_MASK) as usize]
-                        | (self.up_table[(tboard >> 16 & ROW_MASK) as usize] << 4)
-                        | (self.up_table[(tboard >> 32 & ROW_MASK) as usize] << 8)
-                        | (self.up_table[(tboard >> 48 & ROW_MASK) as usize] << 12),
-                    self.up_reward_table[(tboard & ROW_MASK) as usize]
-                        + self.up_reward_table[(tboard >> 16 & ROW_MASK) as usize]
-                        + self.up_reward_table[(tboard >> 32 & ROW_MASK) as usize]
-                        + self.up_reward_table[(tboard >> 48 & ROW_MASK) as usize],
-                )
-            }
-            Move::Down => {
-                let tboard = transpose(board);
-                (
-                    self.down_table[(tboard & ROW_MASK) as usize]
-                        | (self.down_table[(tboard >> 16 & ROW_MASK) as usize] << 4)
-                        | (self.down_table[(tboard >> 32 & ROW_MASK) as usize] << 8)
-                        | (self.down_table[(tboard >> 48 & ROW_MASK) as usize] << 12),
-                    self.down_reward_table[(tboard & ROW_MASK) as usize]
-                        + self.down_reward_table[(tboard >> 16 & ROW_MASK) as usize]
-                        + self.down_reward_table[(tboard >> 32 & ROW_MASK) as usize]
-                        + self.down_reward_table[(tboard >> 48 & ROW_MASK) as usize],
-                )
-            }
+impl Agent {
+    fn get_ntuples(&self, board: u64) -> ([[u64; 8]; 8], f32) {
+        let mut output_ntuples = [[0; 8]; 8];
+        let mut total_value: f32 = 0.0;
+        for (i, (mask_fn, values)) in zip(NTUPLE_MASKS_FNS, &self.ntuple_values).enumerate() {
+            let (ntuples, value) = get_ntuples_for_mask_fn(board, mask_fn, values);
+            output_ntuples[i] = ntuples;
+            total_value += value;
         }
+        (output_ntuples, total_value)
     }
 
-    fn search(&mut self, board: u64) -> (u64, bool) {
-        let mut best_value: f32 = f32::NEG_INFINITY;
-        let mut best_board: u64 = 0;
-        let (ntuples1, values1) = get_ntuples(board, ntuple_mask_1, &self.ntuple_values_1);
-        let (ntuples2, values2) = get_ntuples(board, ntuple_mask_2, &self.ntuple_values_2);
-        let (ntuples3, values3) = get_ntuples(board, ntuple_mask_3, &self.ntuple_values_3);
-        let (ntuples4, values4) = get_ntuples(board, ntuple_mask_4, &self.ntuple_values_4);
-        let (ntuples5, values5) = get_ntuples(board, ntuple_mask_5, &self.ntuple_values_5);
-        let (ntuples6, values6) = get_ntuples(board, ntuple_mask_6, &self.ntuple_values_6);
-        let (ntuples7, values7) = get_ntuples(board, ntuple_mask_7, &self.ntuple_values_7);
-        let (ntuples8, values8) = get_ntuples(board, ntuple_mask_8, &self.ntuple_values_8);
-        let current_value =
-            values1 + values2 + values3 + values4 + values5 + values6 + values7 + values8;
+    fn do_best_move(&mut self, board: u64) -> (u64, u64) {
+        let mut best_afterstate_value: f32 = f32::NEG_INFINITY;
+        let mut best_board_afterstate: u64 = 0;
         let mut best_move_reward: u64 = 0;
         for m in MOVES {
-            let (mut new_board, reward) = self.execute_move(board, m);
-            if new_board == board {
+            let (board_afterstate, reward) = execute_move(board, m);
+            if board_afterstate == board {
                 continue;
             }
-            new_board = insert_random_tile(new_board);
-            let (_, values1) = get_ntuples(new_board, ntuple_mask_1, &self.ntuple_values_1);
-            let (_, values2) = get_ntuples(new_board, ntuple_mask_2, &self.ntuple_values_2);
-            let (_, values3) = get_ntuples(new_board, ntuple_mask_3, &self.ntuple_values_3);
-            let (_, values4) = get_ntuples(new_board, ntuple_mask_4, &self.ntuple_values_4);
-            let (_, values5) = get_ntuples(new_board, ntuple_mask_5, &self.ntuple_values_5);
-            let (_, values6) = get_ntuples(new_board, ntuple_mask_6, &self.ntuple_values_6);
-            let (_, values7) = get_ntuples(new_board, ntuple_mask_7, &self.ntuple_values_7);
-            let (_, values8) = get_ntuples(new_board, ntuple_mask_8, &self.ntuple_values_8);
-            let next_state_value = values1
-                + values2
-                + values3
-                + values4
-                + values5
-                + values6
-                + values7
-                + values8
-                + reward as f32;
-            if next_state_value > best_value {
-                best_value = next_state_value;
-                best_board = new_board;
+            let (ntuples, value) = self.get_ntuples(board_afterstate);
+            let next_state_value = value + reward as f32;
+            if next_state_value > best_afterstate_value {
+                best_afterstate_value = next_state_value;
+                best_board_afterstate = board_afterstate;
                 best_move_reward = reward;
             }
         }
-        if best_board == 0 {
-            return (board, true);
+        (best_board_afterstate, best_move_reward)
+    }
+
+    fn learn_epoch(&mut self) -> u64 {
+        // Create a fresh board.
+        let mut board: u64 = 0;
+        self.score = 0;
+        board = insert_random_tile(board);
+        board = insert_random_tile(board);
+        // Do the first greedy move to get to the afterstate.
+        let (mut board_afterstate, mut move_reward) = self.do_best_move(board);
+        let (mut afterstate_ntuples, mut afterstate_value) = self.get_ntuples(board_afterstate);
+        self.score += move_reward;
+        loop {
+            // Transition to next state.
+            board = insert_random_tile(board);
+            // Greedily pick the best next move.
+            (board_afterstate, move_reward) = self.do_best_move(board);
+            self.score += move_reward;
+            // print_game_state(board);
+            // println!("----------");
+            // print_game_state(board_afterstate);
+            // println!("==========");
+            // If the game is over, afterstate values are ???
+            if board_afterstate == 0 {
+                return board;
+            }
+            // Get the afterstate ntuples and value.
+            let (new_afterstate_ntuples, new_afterstate_value) = self.get_ntuples(board_afterstate);
+            // Update afterstate values of the previous afterstate ntuple tables.
+            let delta = ((move_reward as f32) + new_afterstate_value) - afterstate_value;
+            for (i, ntuple_set) in afterstate_ntuples.iter().enumerate() {
+                for ntuple in ntuple_set.iter() {
+                    self.ntuple_values[i][*ntuple as usize] += 0.1 * delta / 64.0;
+                }
+            }
+            // Set the current afterstate ntuples to the ntuples of the new best move.
+            afterstate_ntuples = new_afterstate_ntuples;
+            afterstate_value = new_afterstate_value;
+            board = board_afterstate;
         }
-        self.score += best_move_reward;
-        let delta = best_value - current_value;
-        for ntuple in ntuples1.iter() {
-            self.ntuple_values_1[*ntuple as usize] += 0.1 * delta / 64.0;
-        }
-        for ntuple in ntuples2.iter() {
-            self.ntuple_values_2[*ntuple as usize] += 0.1 * delta / 64.0;
-        }
-        for ntuple in ntuples3.iter() {
-            self.ntuple_values_3[*ntuple as usize] += 0.1 * delta / 64.0;
-        }
-        for ntuple in ntuples4.iter() {
-            self.ntuple_values_4[*ntuple as usize] += 0.1 * delta / 64.0;
-        }
-        for ntuple in ntuples5.iter() {
-            self.ntuple_values_5[*ntuple as usize] += 0.1 * delta / 64.0;
-        }
-        for ntuple in ntuples6.iter() {
-            self.ntuple_values_6[*ntuple as usize] += 0.1 * delta / 64.0;
-        }
-        for ntuple in ntuples7.iter() {
-            self.ntuple_values_7[*ntuple as usize] += 0.1 * delta / 64.0;
-        }
-        for ntuple in ntuples8.iter() {
-            self.ntuple_values_8[*ntuple as usize] += 0.1 * delta / 64.0;
-        }
-        (best_board, false)
     }
 }
 
@@ -443,15 +470,20 @@ mod tests {
 
     #[test]
     fn test_get_ntuples() {
-        let ntuple_values_1 = vec![0.0; 16777216].into_boxed_slice();
-        let (ntuples1, values1) = get_ntuples(TEST_BOARD, ntuple_mask_1, &ntuple_values_1);
+        let ntuple_values_1 = vec![0.0; 16777216];
+        let (ntuples1, values1) =
+            get_ntuples_for_mask_fn(TEST_BOARD, ntuple_mask_1, &ntuple_values_1);
         let true_ntuples1 = [
             ntuple_mask_from_values([0, 1, 2, 4, 5, 6]),
             ntuple_mask_from_values([0, 4, 8, 1, 5, 9]),
             ntuple_mask_from_values([3, 2, 1, 7, 6, 5]),
             ntuple_mask_from_values([3, 7, 11, 2, 6, 10]),
+            ntuple_mask_from_values([12, 13, 14, 8, 9, 10]),
+            ntuple_mask_from_values([12, 8, 4, 13, 9, 5]),
+            ntuple_mask_from_values([15, 14, 13, 11, 10, 9]),
+            ntuple_mask_from_values([15, 11, 7, 14, 10, 6]),
         ];
-        for i in 0..4 {
+        for i in 0..8 {
             if ntuples1[i] != true_ntuples1[i] {
                 println!("Test failed for ntuple: {}", i + 1);
                 print_ntuple(ntuples1[i]);
@@ -461,55 +493,60 @@ mod tests {
         }
         assert_eq!(values1, 0.0)
     }
+
+    #[test]
+    fn test_reward_tables() {
+        for (row, (_, reward)) in TTABLE.left_table.iter().enumerate() {
+            let mut actual_reward: u64 = 0;
+            let mut last_value: u16 = 0;
+            for i in 0..4 {
+                let value = (row as u16) >> (4 * i) & 0xF;
+                if value != 0 {
+                    if value == last_value {
+                        actual_reward += 1 << (value + 1);
+                        last_value = 0;
+                    } else {
+                        last_value = value;
+                    }
+                }
+            }
+            assert_eq!(*reward, actual_reward);
+        }
+    }
 }
 
 fn main() {
-    let mut game: Game = Game {
+    println!("Starting");
+    let mut agent = Agent {
         score: 0,
-        left_table: &mut [0; 65536],
-        right_table: &mut [0; 65536],
-        up_table: &mut [0; 65536],
-        down_table: &mut [0; 65536],
-        left_reward_table: &mut [0; 65536],
-        right_reward_table: &mut [0; 65536],
-        up_reward_table: &mut [0; 65536],
-        down_reward_table: &mut [0; 65536],
-        ntuple_values_1: vec![0.0; 16777216].into_boxed_slice(),
-        ntuple_values_2: vec![0.0; 16777216].into_boxed_slice(),
-        ntuple_values_3: vec![0.0; 16777216].into_boxed_slice(),
-        ntuple_values_4: vec![0.0; 16777216].into_boxed_slice(),
-        ntuple_values_5: vec![0.0; 16777216].into_boxed_slice(),
-        ntuple_values_6: vec![0.0; 16777216].into_boxed_slice(),
-        ntuple_values_7: vec![0.0; 16777216].into_boxed_slice(),
-        ntuple_values_8: vec![0.0; 16777216].into_boxed_slice(),
+        ntuple_values: [
+            vec![0.0; 16777216],
+            vec![0.0; 16777216],
+            vec![0.0; 16777216],
+            vec![0.0; 16777216],
+            vec![0.0; 16777216],
+            vec![0.0; 16777216],
+            vec![0.0; 16777216],
+            vec![0.0; 16777216],
+        ],
     };
     let mut start: SystemTime = SystemTime::now();
     let mut count: u32 = 0;
     let mut best_score = 0;
-    let mut board: u64 = 0;
-    game.fill_transition_tables();
-    board = insert_random_tile(board);
-    board = insert_random_tile(board);
     loop {
-        let (new_board, game_over) = game.search(board);
-        board = new_board;
-        if game_over {
-            count += 1;
-            if count % 10000 == 0 {
-                print_game_state(board);
-                let elapsed = start.elapsed().unwrap();
-                println!(
-                    "Time: {:?} Games Played: {:?} Best Score: {:?}",
-                    elapsed, count, best_score
-                );
-                start = SystemTime::now();
-            }
-            best_score = best_score.max(game.score);
-            board = 0;
-            board = insert_random_tile(board);
-            board = insert_random_tile(board);
-            game.score = 0;
+        let final_board = agent.learn_epoch();
+        count += 1;
+        if count % 100 == 0 {
+            let elapsed = start.elapsed().unwrap();
+            print_game_state(final_board);
+            println!(
+                "Time: {:?} Games Played: {:?} Best Score: {:?}",
+                elapsed, count, best_score
+            );
+            start = SystemTime::now();
         }
+        best_score = best_score.max(agent.score);
+        agent.score = 0;
     }
     // loop {
     //     // Wait for input from the user.
