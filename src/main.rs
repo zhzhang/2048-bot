@@ -4,7 +4,7 @@ extern crate lazy_static;
 
 use rand::{seq::IteratorRandom, thread_rng, Rng};
 
-use std::iter::zip;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::SystemTime;
 
@@ -396,71 +396,58 @@ impl Agent {
 
 const V_INIT: f32 = 370000.0;
 const NTHREADS: usize = 10;
-const EPOCH_SIZE: usize = 1000;
+const EPOCH_SIZE: usize = 10000;
+
+struct AgentOutput {
+    count: u64,
+    best_score: u64,
+    total_score: u64,
+    best_board: u64,
+}
 
 fn main() {
     let mut ntuple_values = vec![V_INIT; NTUPLE_LUT_SIZE * NTUPLE_MASKS_FNS.len()];
-    let mut epoch = 1;
-    loop {
-        let mut thread_handles = Vec::new();
-        let start = SystemTime::now();
-        for _ in 0..NTHREADS {
-            let mut agent = Agent {
-                ntuple_raw_ptr: ntuple_values.as_mut_ptr(),
-            };
-            let handle = thread::spawn(|| {
-                let mut best_score = 0;
-                let mut best_board = 0;
-                let mut total_score: u64 = 0;
-                for _ in 0..EPOCH_SIZE {
-                    let (final_board, score) = agent.learn_epoch();
-                    total_score += score;
-                    if score > best_score {
-                        best_score = score;
-                        best_board = final_board;
-                    }
-                }
-                (best_score, total_score, best_board, agent)
-            });
-            thread_handles.push(handle);
-        }
-        let mut outputs = Vec::new();
-        for handle in thread_handles {
-            outputs.push(handle.join().unwrap());
-        }
-        let mut all_total_score = 0;
-        let mut all_best_score = 0;
-        let mut all_best_board = 0;
-        let mut agents = Vec::new();
-        for (best_score, total_score, best_board, agent) in outputs {
-            all_total_score += total_score;
-            if best_score > all_best_score {
-                all_best_score = best_score;
-                all_best_board = best_board;
+    let agent_output = Arc::new(Mutex::new(AgentOutput {
+        count: 0,
+        best_score: 0,
+        total_score: 0,
+        best_board: 0,
+    }));
+    for _ in 0..NTHREADS {
+        let agent_output_clone = Arc::clone(&agent_output);
+        let mut agent = Agent {
+            ntuple_raw_ptr: ntuple_values.as_mut_ptr(),
+        };
+        thread::spawn(move || loop {
+            let (final_board, score) = agent.learn_epoch();
+            let mut agent_output = agent_output_clone.lock().unwrap();
+            if score > agent_output.best_score {
+                agent_output.best_score = score;
+                agent_output.best_board = final_board;
             }
-            agents.push(agent);
+            agent_output.total_score += score;
+            agent_output.count += 1;
+            drop(agent_output);
+        });
+    }
+    let mut last_count = 0;
+    let mut start = SystemTime::now();
+    loop {
+        let mut agent_output = agent_output.lock().unwrap();
+        if agent_output.count >= last_count + EPOCH_SIZE as u64 {
+            print_game_state(agent_output.best_board);
+            println!(
+                "Time: {:?} Games Played: {:?} Best Score: {:?} Average Score: {:?}",
+                start.elapsed().unwrap(),
+                agent_output.count,
+                agent_output.best_score,
+                agent_output.total_score / (agent_output.count - last_count) as u64
+            );
+            last_count = agent_output.count;
+            agent_output.total_score = 0;
+            start = SystemTime::now();
         }
-
-        print_game_state(all_best_board);
-        println!(
-            "Time: {:?} Games Played: {:?} Best Score: {:?} Average Score: {:?}",
-            start.elapsed().unwrap(),
-            epoch * EPOCH_SIZE * NTHREADS,
-            all_best_score,
-            all_total_score / (EPOCH_SIZE * NTHREADS) as u64
-        );
-        // // Merge the ntuple values by averaging.
-        // for i in 0..NTUPLE_MASKS_FNS.len() {
-        //     for j in 0..ntuple_values[i].len() {
-        //         ntuple_values[i][j] = 0.0;
-        //         for agent in &agents {
-        //             ntuple_values[i][j] += agent.ntuple_values[i][j];
-        //         }
-        //         ntuple_values[i][j] /= NTHREADS as f32;
-        //     }
-        // }
-        // println!("Merge complete.");
-        epoch += 1;
+        drop(agent_output)
     }
     // loop {
     //     // Wait for input from the user.
@@ -561,9 +548,11 @@ mod tests {
 
     #[test]
     fn test_get_ntuples() {
-        let ntuple_values_1 = vec![0.0; 16777216];
-        let (ntuples1, values1) =
-            get_ntuples_for_mask_fn(TEST_BOARD, ntuple_mask_1, &ntuple_values_1);
+        let ntuple_values = vec![V_INIT; NTUPLE_LUT_SIZE * NTUPLE_MASKS_FNS.len()];
+        let agent = Agent {
+            ntuple_raw_ptr: ntuple_values.as_ptr() as *mut f32,
+        };
+        let (ntuples1, values1) = agent.get_ntuples_for_mask_fn(TEST_BOARD, ntuple_mask_1, 1);
         let true_ntuples1 = [
             ntuple_mask_from_values([0, 1, 2, 4, 5, 6]),
             ntuple_mask_from_values([0, 4, 8, 1, 5, 9]),
@@ -582,7 +571,7 @@ mod tests {
             }
             assert_eq!(ntuples1[i], true_ntuples1[i]);
         }
-        assert_eq!(values1, 0.0)
+        assert_eq!(values1, 8.0 * V_INIT);
     }
 
     #[test]
