@@ -27,11 +27,6 @@ const NTUPLE_MASKS_FNS: [fn(u64) -> u64; 8] = [
     ntuple_mask_8,
 ];
 
-struct Agent {
-    score: u64,
-    ntuple_values: [Vec<f32>; NTUPLE_MASKS_FNS.len()],
-}
-
 struct TransitionTable {
     left_table: Vec<(u64, u64)>,
     right_table: Vec<(u64, u64)>,
@@ -201,7 +196,6 @@ fn print_game_state(board: u64) {
 }
 
 fn generate_transition_tables() -> TransitionTable {
-    println!("Generating transition tables.");
     let mut left_table: Vec<(u64, u64)> = vec![(0, 0); 65536];
     let mut right_table: Vec<(u64, u64)> = vec![(0, 0); 65536];
     let mut up_table: Vec<(u64, u64)> = vec![(0, 0); 65536];
@@ -211,7 +205,6 @@ fn generate_transition_tables() -> TransitionTable {
         let mut last_value: u64 = 0;
         let mut reward: u64 = 0;
         for position in 0..4 {
-            // println!("i: {}", i);
             let value = line_repr >> (4 * position) & 0xF;
             if value != 0 {
                 if value == last_value {
@@ -225,7 +218,6 @@ fn generate_transition_tables() -> TransitionTable {
                     last_value = value;
                 }
             }
-            // println!("line: {:?}", line);
         }
         if last_value != 0 {
             new_line.push(last_value);
@@ -319,9 +311,13 @@ fn execute_move(board: u64, m: Move) -> (u64, u64) {
     }
 }
 
+struct Agent {
+    ntuple_values: [Vec<f32>; NTUPLE_MASKS_FNS.len()],
+}
+
 impl Agent {
-    fn get_ntuples(&self, board: u64) -> ([[u64; 8]; 8], f32) {
-        let mut output_ntuples = [[0; 8]; 8];
+    fn get_ntuples(&self, board: u64) -> ([[u64; 8]; NTUPLE_MASKS_FNS.len()], f32) {
+        let mut output_ntuples = [[0; 8]; NTUPLE_MASKS_FNS.len()];
         let mut total_value: f32 = 0.0;
         for (i, (mask_fn, values)) in zip(NTUPLE_MASKS_FNS, &self.ntuple_values).enumerate() {
             let (ntuples, value) = get_ntuples_for_mask_fn(board, mask_fn, values);
@@ -331,54 +327,68 @@ impl Agent {
         (output_ntuples, total_value)
     }
 
-    fn do_best_move(&mut self, board: u64) -> (u64, u64) {
+    fn do_best_move(&mut self, board: u64) -> (u64, u64, [[u64; 8]; NTUPLE_MASKS_FNS.len()], f32) {
         let mut best_afterstate_value: f32 = f32::NEG_INFINITY;
         let mut best_board_afterstate: u64 = 0;
         let mut best_move_reward: u64 = 0;
+        let mut best_move_ntuples: [[u64; 8]; NTUPLE_MASKS_FNS.len()] =
+            [[0; 8]; NTUPLE_MASKS_FNS.len()];
         for m in MOVES {
             let (board_afterstate, reward) = execute_move(board, m);
             if board_afterstate == board {
                 continue;
             }
             let (ntuples, value) = self.get_ntuples(board_afterstate);
-            let next_state_value = value + reward as f32;
-            if next_state_value > best_afterstate_value {
-                best_afterstate_value = next_state_value;
+            if value + reward as f32 > best_afterstate_value {
+                best_afterstate_value = value;
                 best_board_afterstate = board_afterstate;
                 best_move_reward = reward;
+                best_move_ntuples = ntuples;
             }
         }
-        (best_board_afterstate, best_move_reward)
+        (
+            best_board_afterstate,
+            best_move_reward,
+            best_move_ntuples,
+            best_afterstate_value,
+        )
     }
 
-    fn learn_epoch(&mut self) -> u64 {
+    fn learn_epoch(&mut self) -> (u64, u64) {
         // Create a fresh board.
         let mut board: u64 = 0;
-        self.score = 0;
+        let mut score = 0;
         board = insert_random_tile(board);
         board = insert_random_tile(board);
         // Do the first greedy move to get to the afterstate.
-        let (mut board_afterstate, mut move_reward) = self.do_best_move(board);
-        let (mut afterstate_ntuples, mut afterstate_value) = self.get_ntuples(board_afterstate);
-        self.score += move_reward;
+        let (mut board_afterstate, move_reward, mut afterstate_ntuples, mut afterstate_value) =
+            self.do_best_move(board);
+        score += move_reward;
         loop {
             // Transition to next state.
-            board = insert_random_tile(board);
+            board = insert_random_tile(board_afterstate);
             // Greedily pick the best next move.
-            (board_afterstate, move_reward) = self.do_best_move(board);
-            self.score += move_reward;
-            // print_game_state(board);
-            // println!("----------");
-            // print_game_state(board_afterstate);
-            // println!("==========");
-            // If the game is over, afterstate values are ???
-            if board_afterstate == 0 {
-                return board;
+            let (
+                new_board_afterstate,
+                new_move_reward,
+                new_afterstate_ntuples,
+                new_afterstate_value,
+            ) = self.do_best_move(board);
+            // If no move was possible, the game is over.
+            if new_board_afterstate == 0 {
+                // If the game is over, afterstate value is the score.
+                let delta = score as f32 - afterstate_value;
+                // println!("{} {}", score, delta);
+                for (i, ntuple_set) in afterstate_ntuples.iter().enumerate() {
+                    for ntuple in ntuple_set.iter() {
+                        self.ntuple_values[i][*ntuple as usize] += 0.1 * delta / 64.0;
+                    }
+                }
+                return (board, score);
             }
-            // Get the afterstate ntuples and value.
-            let (new_afterstate_ntuples, new_afterstate_value) = self.get_ntuples(board_afterstate);
+            score += new_move_reward;
             // Update afterstate values of the previous afterstate ntuple tables.
-            let delta = ((move_reward as f32) + new_afterstate_value) - afterstate_value;
+            let delta = ((new_move_reward as f32) + new_afterstate_value) - afterstate_value;
             for (i, ntuple_set) in afterstate_ntuples.iter().enumerate() {
                 for ntuple in ntuple_set.iter() {
                     self.ntuple_values[i][*ntuple as usize] += 0.1 * delta / 64.0;
@@ -387,9 +397,62 @@ impl Agent {
             // Set the current afterstate ntuples to the ntuples of the new best move.
             afterstate_ntuples = new_afterstate_ntuples;
             afterstate_value = new_afterstate_value;
-            board = board_afterstate;
+            board_afterstate = new_board_afterstate;
         }
     }
+}
+
+const V_INIT: f32 = 370000.0;
+
+fn main() {
+    let mut agent = Agent {
+        ntuple_values: [
+            vec![V_INIT; 16777216],
+            vec![V_INIT; 16777216],
+            vec![V_INIT; 16777216],
+            vec![V_INIT; 16777216],
+            vec![V_INIT; 16777216],
+            vec![V_INIT; 16777216],
+            vec![V_INIT; 16777216],
+            vec![V_INIT; 16777216],
+        ],
+    };
+    let mut start: SystemTime = SystemTime::now();
+    let mut count: u32 = 0;
+    let mut best_score = 0;
+    loop {
+        let (final_board, score) = agent.learn_epoch();
+        count += 1;
+        if count % 1000 == 0 {
+            let elapsed = start.elapsed().unwrap();
+            print_game_state(final_board);
+            println!(
+                "Time: {:?} Games Played: {:?} Best Score: {:?}",
+                elapsed, count, best_score
+            );
+            start = SystemTime::now();
+        }
+        best_score = best_score.max(score);
+    }
+    // loop {
+    //     // Wait for input from the user.
+    //     let mut input = String::new();
+    //     print!("Next move: ");
+    //     io::stdout().flush().unwrap();
+    //     io::stdin().read_line(&mut input).unwrap();
+    //     // Update the game state.
+    //     match input.trim() {
+    //         "a" => board = game.execute_move(board, Move::Left),
+    //         "d" => board = game.execute_move(board, Move::Right),
+    //         "w" => board = game.execute_move(board, Move::Up),
+    //         "s" => board = game.execute_move(board, Move::Down),
+    //         _ => println!("Invalid move.")
+    //     }
+    //     // Insert a new tile.
+    //     board= insert_random_tile(board);
+    //     // Print the game state.
+    //     print_game_state(board);
+    // }
 }
 
 #[cfg(test)]
@@ -513,58 +576,4 @@ mod tests {
             assert_eq!(*reward, actual_reward);
         }
     }
-}
-
-fn main() {
-    println!("Starting");
-    let mut agent = Agent {
-        score: 0,
-        ntuple_values: [
-            vec![0.0; 16777216],
-            vec![0.0; 16777216],
-            vec![0.0; 16777216],
-            vec![0.0; 16777216],
-            vec![0.0; 16777216],
-            vec![0.0; 16777216],
-            vec![0.0; 16777216],
-            vec![0.0; 16777216],
-        ],
-    };
-    let mut start: SystemTime = SystemTime::now();
-    let mut count: u32 = 0;
-    let mut best_score = 0;
-    loop {
-        let final_board = agent.learn_epoch();
-        count += 1;
-        if count % 100 == 0 {
-            let elapsed = start.elapsed().unwrap();
-            print_game_state(final_board);
-            println!(
-                "Time: {:?} Games Played: {:?} Best Score: {:?}",
-                elapsed, count, best_score
-            );
-            start = SystemTime::now();
-        }
-        best_score = best_score.max(agent.score);
-        agent.score = 0;
-    }
-    // loop {
-    //     // Wait for input from the user.
-    //     let mut input = String::new();
-    //     print!("Next move: ");
-    //     io::stdout().flush().unwrap();
-    //     io::stdin().read_line(&mut input).unwrap();
-    //     // Update the game state.
-    //     match input.trim() {
-    //         "a" => board = game.execute_move(board, Move::Left),
-    //         "d" => board = game.execute_move(board, Move::Right),
-    //         "w" => board = game.execute_move(board, Move::Up),
-    //         "s" => board = game.execute_move(board, Move::Down),
-    //         _ => println!("Invalid move.")
-    //     }
-    //     // Insert a new tile.
-    //     board= insert_random_tile(board);
-    //     // Print the game state.
-    //     print_game_state(board);
-    // }
 }
