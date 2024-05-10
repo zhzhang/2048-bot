@@ -403,36 +403,82 @@ impl Agent {
 }
 
 const V_INIT: f32 = 370000.0;
+const NTHREADS: usize = 10;
+const EPOCH_SIZE: usize = 10000;
 
 fn main() {
-    let mut agent = Agent {
-        ntuple_values: [
-            vec![V_INIT; 16777216],
-            vec![V_INIT; 16777216],
-            vec![V_INIT; 16777216],
-            vec![V_INIT; 16777216],
-            vec![V_INIT; 16777216],
-            vec![V_INIT; 16777216],
-            vec![V_INIT; 16777216],
-            vec![V_INIT; 16777216],
-        ],
-    };
-    let mut start: SystemTime = SystemTime::now();
-    let mut count: u32 = 0;
-    let mut best_score = 0;
+    let mut ntuple_values: [Vec<f32>; NTUPLE_MASKS_FNS.len()] = [
+        vec![V_INIT; 16777216],
+        vec![V_INIT; 16777216],
+        vec![V_INIT; 16777216],
+        vec![V_INIT; 16777216],
+        vec![V_INIT; 16777216],
+        vec![V_INIT; 16777216],
+        vec![V_INIT; 16777216],
+        vec![V_INIT; 16777216],
+    ];
+    let mut epoch = 1;
     loop {
-        let (final_board, score) = agent.learn_epoch();
-        count += 1;
-        if count % 1000 == 0 {
-            let elapsed = start.elapsed().unwrap();
-            print_game_state(final_board);
-            println!(
-                "Time: {:?} Games Played: {:?} Best Score: {:?}",
-                elapsed, count, best_score
-            );
-            start = SystemTime::now();
+        let mut thread_handles = Vec::new();
+        let start = SystemTime::now();
+        for _ in 0..NTHREADS {
+            let ntuple_values = ntuple_values.clone();
+            let mut agent = Agent {
+                ntuple_values: ntuple_values,
+            };
+            let handle = thread::spawn(|| {
+                let mut best_score = 0;
+                let mut best_board = 0;
+                let mut total_score: u64 = 0;
+                for _ in 0..EPOCH_SIZE {
+                    let (final_board, score) = agent.learn_epoch();
+                    total_score += score;
+                    if score > best_score {
+                        best_score = score;
+                        best_board = final_board;
+                    }
+                }
+                (best_score, total_score, best_board, agent)
+            });
+            thread_handles.push(handle);
         }
-        best_score = best_score.max(score);
+        let mut outputs = Vec::new();
+        for handle in thread_handles {
+            outputs.push(handle.join().unwrap());
+        }
+        let mut all_total_score = 0;
+        let mut all_best_score = 0;
+        let mut all_best_board = 0;
+        let mut agents = Vec::new();
+        for (best_score, total_score, best_board, agent) in outputs {
+            all_total_score += total_score;
+            if best_score > all_best_score {
+                all_best_score = best_score;
+                all_best_board = best_board;
+            }
+            agents.push(agent);
+        }
+
+        print_game_state(all_best_board);
+        println!(
+            "Time: {:?} Games Played: {:?} Best Score: {:?} Average Score: {:?}",
+            start.elapsed().unwrap(),
+            epoch * EPOCH_SIZE * NTHREADS,
+            all_best_score,
+            all_total_score / (EPOCH_SIZE * NTHREADS) as u64
+        );
+        // Merge the ntuple values by averaging.
+        for i in 0..NTUPLE_MASKS_FNS.len() {
+            for j in 0..ntuple_values[i].len() {
+                ntuple_values[i][j] = 0.0;
+                for agent in &agents {
+                    ntuple_values[i][j] += agent.ntuple_values[i][j];
+                }
+                ntuple_values[i][j] /= NTHREADS as f32;
+            }
+        }
+        println!("Merge complete.");
+        epoch += 1;
     }
     // loop {
     //     // Wait for input from the user.
