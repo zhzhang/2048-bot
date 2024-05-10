@@ -16,17 +16,6 @@ enum Move {
     Down,
 }
 
-const NTUPLE_MASKS_FNS: [fn(u64) -> u64; 8] = [
-    ntuple_mask_1,
-    ntuple_mask_2,
-    ntuple_mask_3,
-    ntuple_mask_4,
-    ntuple_mask_5,
-    ntuple_mask_6,
-    ntuple_mask_7,
-    ntuple_mask_8,
-];
-
 struct TransitionTable {
     left_table: Vec<(u64, u64)>,
     right_table: Vec<(u64, u64)>,
@@ -41,78 +30,6 @@ lazy_static! {
 const MOVES: [Move; 4] = [Move::Left, Move::Right, Move::Up, Move::Down];
 const ROW_MASK: u64 = 0xFFFF;
 const COL_MASK: u64 = 0x000F000F000F000F;
-
-fn ntuple_mask_1(board: u64) -> u64 {
-    ((board >> 36) & 0xFFF) | ((board >> 40) & 0xFFF000)
-}
-
-fn ntuple_mask_2(board: u64) -> u64 {
-    ((board >> 8) & 0xF)
-        | ((board >> 20) & 0xF0)
-        | ((board >> 28) & 0xFF00)
-        | ((board >> 36) & 0xFF0000)
-}
-
-fn ntuple_mask_3(board: u64) -> u64 {
-    board >> 40
-}
-
-fn ntuple_mask_4(board: u64) -> u64 {
-    ((board >> 20) & 0xF) | ((board >> 28) & 0xFFF0) | ((board >> 40) & 0xFF0000)
-}
-
-fn ntuple_mask_5(board: u64) -> u64 {
-    ((board >> 20) & 0xFF) | ((board >> 32) & 0xF00) | ((board >> 40) & 0xFFF000)
-}
-
-fn ntuple_mask_6(board: u64) -> u64 {
-    ((board >> 4) & 0xFF)
-        | ((board >> 16) & 0xF00)
-        | ((board >> 28) & 0xF000)
-        | ((board >> 40) & 0xFF0000)
-}
-
-fn ntuple_mask_7(board: u64) -> u64 {
-    ((board >> 8) & 0xF)
-        | ((board >> 20) & 0xFF0)
-        | ((board >> 28) & 0xF000)
-        | ((board >> 40) & 0xFF0000)
-}
-
-fn ntuple_mask_8(board: u64) -> u64 {
-    ((board >> 20) & 0xF)
-        | ((board >> 32) & 0xF0)
-        | ((board >> 36) & 0xF00)
-        | ((board >> 40) & 0xFFF000)
-}
-
-fn get_ntuples_for_mask_fn(
-    board: u64,
-    mask_fn: fn(u64) -> u64,
-    values: &Vec<f32>,
-) -> ([u64; 8], f32) {
-    let ntuples = [
-        mask_fn(board),
-        mask_fn(transpose(board)),
-        mask_fn(fliph(board)),
-        mask_fn(transpose(fliph(board))),
-        mask_fn(flipv(board)),
-        mask_fn(transpose(flipv(board))),
-        mask_fn(fliph(flipv(board))),
-        mask_fn(transpose(fliph(flipv(board)))),
-    ];
-    let ntuple_values = [
-        values[ntuples[0] as usize],
-        values[ntuples[1] as usize],
-        values[ntuples[2] as usize],
-        values[ntuples[3] as usize],
-        values[ntuples[4] as usize],
-        values[ntuples[5] as usize],
-        values[ntuples[6] as usize],
-        values[ntuples[7] as usize],
-    ];
-    (ntuples, ntuple_values.into_iter().sum())
-}
 
 fn random_tile_value() -> u8 {
     let mut rng = rand::thread_rng();
@@ -244,13 +161,6 @@ fn generate_transition_tables() -> TransitionTable {
 fn execute_move(board: u64, m: Move) -> (u64, u64) {
     match m {
         Move::Left => {
-            //     | (self.left_table[(board >> 16 & ROW_MASK) as usize] << 16)
-            //     | (self.left_table[(board >> 32 & ROW_MASK) as usize] << 32)
-            //     | (self.left_table[(board >> 48 & ROW_MASK) as usize] << 48),
-            // self.left_reward_table[(board & ROW_MASK) as usize]
-            //     + self.left_reward_table[(board >> 16 & ROW_MASK) as usize]
-            //     + self.left_reward_table[(board >> 32 & ROW_MASK) as usize]
-            //     + self.left_reward_table[(board >> 48 & ROW_MASK) as usize],
             let (x1, r1) = TTABLE.left_table[(board & ROW_MASK) as usize];
             let (x2, r2) = TTABLE.left_table[(board >> 16 & ROW_MASK) as usize];
             let (x3, r3) = TTABLE.left_table[(board >> 32 & ROW_MASK) as usize];
@@ -258,14 +168,6 @@ fn execute_move(board: u64, m: Move) -> (u64, u64) {
             (x1 | (x2 << 16) | (x3 << 32) | (x4 << 48), r1 + r2 + r3 + r4)
         }
         Move::Right => {
-            // self.right_table[(board & ROW_MASK) as usize]
-            //     | (self.right_table[(board >> 16 & ROW_MASK) as usize] << 16)
-            //     | (self.right_table[(board >> 32 & ROW_MASK) as usize] << 32)
-            //     | (self.right_table[(board >> 48 & ROW_MASK) as usize] << 48),
-            // self.right_reward_table[(board & ROW_MASK) as usize]
-            //     + self.right_reward_table[(board >> 16 & ROW_MASK) as usize]
-            //     + self.right_reward_table[(board >> 32 & ROW_MASK) as usize]
-            //     + self.right_reward_table[(board >> 48 & ROW_MASK) as usize],
             let (x1, r1) = TTABLE.right_table[(board & ROW_MASK) as usize];
             let (x2, r2) = TTABLE.right_table[(board >> 16 & ROW_MASK) as usize];
             let (x3, r3) = TTABLE.right_table[(board >> 32 & ROW_MASK) as usize];
@@ -274,16 +176,6 @@ fn execute_move(board: u64, m: Move) -> (u64, u64) {
         }
         Move::Up => {
             let tboard = transpose(board);
-            // (
-            //     self.up_table[(tboard & ROW_MASK) as usize]
-            //         | (self.up_table[(tboard >> 16 & ROW_MASK) as usize] << 4)
-            //         | (self.up_table[(tboard >> 32 & ROW_MASK) as usize] << 8)
-            //         | (self.up_table[(tboard >> 48 & ROW_MASK) as usize] << 12),
-            //     self.up_reward_table[(tboard & ROW_MASK) as usize]
-            //         + self.up_reward_table[(tboard >> 16 & ROW_MASK) as usize]
-            //         + self.up_reward_table[(tboard >> 32 & ROW_MASK) as usize]
-            //         + self.up_reward_table[(tboard >> 48 & ROW_MASK) as usize],
-            // )
             let (x1, r1) = TTABLE.up_table[(tboard & ROW_MASK) as usize];
             let (x2, r2) = TTABLE.up_table[(tboard >> 16 & ROW_MASK) as usize];
             let (x3, r3) = TTABLE.up_table[(tboard >> 32 & ROW_MASK) as usize];
@@ -292,16 +184,6 @@ fn execute_move(board: u64, m: Move) -> (u64, u64) {
         }
         Move::Down => {
             let tboard = transpose(board);
-            // (
-            //     self.down_table[(tboard & ROW_MASK) as usize]
-            //         | (self.down_table[(tboard >> 16 & ROW_MASK) as usize] << 4)
-            //         | (self.down_table[(tboard >> 32 & ROW_MASK) as usize] << 8)
-            //         | (self.down_table[(tboard >> 48 & ROW_MASK) as usize] << 12),
-            //     self.down_reward_table[(tboard & ROW_MASK) as usize]
-            //         + self.down_reward_table[(tboard >> 16 & ROW_MASK) as usize]
-            //         + self.down_reward_table[(tboard >> 32 & ROW_MASK) as usize]
-            //         + self.down_reward_table[(tboard >> 48 & ROW_MASK) as usize],
-            // )
             let (x1, r1) = TTABLE.down_table[(tboard & ROW_MASK) as usize];
             let (x2, r2) = TTABLE.down_table[(tboard >> 16 & ROW_MASK) as usize];
             let (x3, r3) = TTABLE.down_table[(tboard >> 32 & ROW_MASK) as usize];
@@ -311,16 +193,126 @@ fn execute_move(board: u64, m: Move) -> (u64, u64) {
     }
 }
 
-struct Agent {
-    ntuple_values: [Vec<f32>; NTUPLE_MASKS_FNS.len()],
+//
+// Definition of RL Agent.
+//
+
+const NTUPLE_MASKS_FNS: [fn(u64) -> u64; 8] = [
+    ntuple_mask_1,
+    ntuple_mask_2,
+    ntuple_mask_3,
+    ntuple_mask_4,
+    ntuple_mask_5,
+    ntuple_mask_6,
+    ntuple_mask_7,
+    ntuple_mask_8,
+];
+fn ntuple_mask_1(board: u64) -> u64 {
+    ((board >> 36) & 0xFFF) | ((board >> 40) & 0xFFF000)
 }
 
+fn ntuple_mask_2(board: u64) -> u64 {
+    ((board >> 8) & 0xF)
+        | ((board >> 20) & 0xF0)
+        | ((board >> 28) & 0xFF00)
+        | ((board >> 36) & 0xFF0000)
+}
+
+fn ntuple_mask_3(board: u64) -> u64 {
+    board >> 40
+}
+
+fn ntuple_mask_4(board: u64) -> u64 {
+    ((board >> 20) & 0xF) | ((board >> 28) & 0xFFF0) | ((board >> 40) & 0xFF0000)
+}
+
+fn ntuple_mask_5(board: u64) -> u64 {
+    ((board >> 20) & 0xFF) | ((board >> 32) & 0xF00) | ((board >> 40) & 0xFFF000)
+}
+
+fn ntuple_mask_6(board: u64) -> u64 {
+    ((board >> 4) & 0xFF)
+        | ((board >> 16) & 0xF00)
+        | ((board >> 28) & 0xF000)
+        | ((board >> 40) & 0xFF0000)
+}
+
+fn ntuple_mask_7(board: u64) -> u64 {
+    ((board >> 8) & 0xF)
+        | ((board >> 20) & 0xFF0)
+        | ((board >> 28) & 0xF000)
+        | ((board >> 40) & 0xFF0000)
+}
+
+fn ntuple_mask_8(board: u64) -> u64 {
+    ((board >> 20) & 0xF)
+        | ((board >> 32) & 0xF0)
+        | ((board >> 36) & 0xF00)
+        | ((board >> 40) & 0xFFF000)
+}
+
+struct Agent {
+    // ntuple_values: [Vec<f32>; NTUPLE_MASKS_FNS.len()],
+    // Represent ntuples as a raw pointer to a 1D array to allow lock-free access.
+    ntuple_raw_ptr: *mut f32,
+}
+
+unsafe impl Send for Agent {}
+const NTUPLE_LUT_SIZE: usize = 16777216;
+
 impl Agent {
+    fn get_ntuple_value(&self, mask_fn_index: usize, ntuple_index: usize) -> f32 {
+        unsafe {
+            *self
+                .ntuple_raw_ptr
+                .offset((mask_fn_index * NTUPLE_LUT_SIZE + ntuple_index) as isize)
+                as f32
+        }
+    }
+
+    fn update_ntuple_value(&mut self, mask_fn_index: usize, ntuple_index: usize, update: f32) {
+        unsafe {
+            *self
+                .ntuple_raw_ptr
+                .offset((mask_fn_index * NTUPLE_LUT_SIZE + ntuple_index) as isize) += update;
+        }
+    }
+
+    fn get_ntuples_for_mask_fn(
+        &self,
+        board: u64,
+        mask_fn: fn(u64) -> u64,
+        mask_fn_index: usize,
+    ) -> ([u64; 8], f32) {
+        let ntuples: [u64; 8] = [
+            mask_fn(board),
+            mask_fn(transpose(board)),
+            mask_fn(fliph(board)),
+            mask_fn(transpose(fliph(board))),
+            mask_fn(flipv(board)),
+            mask_fn(transpose(flipv(board))),
+            mask_fn(fliph(flipv(board))),
+            mask_fn(transpose(fliph(flipv(board)))),
+        ];
+        let ntuple_values: [f32; 8] = [
+            self.get_ntuple_value(mask_fn_index, ntuples[0] as usize),
+            self.get_ntuple_value(mask_fn_index, ntuples[1] as usize),
+            self.get_ntuple_value(mask_fn_index, ntuples[2] as usize),
+            self.get_ntuple_value(mask_fn_index, ntuples[3] as usize),
+            self.get_ntuple_value(mask_fn_index, ntuples[4] as usize),
+            self.get_ntuple_value(mask_fn_index, ntuples[5] as usize),
+            self.get_ntuple_value(mask_fn_index, ntuples[6] as usize),
+            self.get_ntuple_value(mask_fn_index, ntuples[7] as usize),
+        ];
+        (ntuples, ntuple_values.into_iter().sum())
+    }
+
     fn get_ntuples(&self, board: u64) -> ([[u64; 8]; NTUPLE_MASKS_FNS.len()], f32) {
-        let mut output_ntuples = [[0; 8]; NTUPLE_MASKS_FNS.len()];
+        let mut output_ntuples: [[u64; 8]; NTUPLE_MASKS_FNS.len()] =
+            [[0; 8]; NTUPLE_MASKS_FNS.len()];
         let mut total_value: f32 = 0.0;
-        for (i, (mask_fn, values)) in zip(NTUPLE_MASKS_FNS, &self.ntuple_values).enumerate() {
-            let (ntuples, value) = get_ntuples_for_mask_fn(board, mask_fn, values);
+        for (i, mask_fn) in NTUPLE_MASKS_FNS.iter().enumerate() {
+            let (ntuples, value) = self.get_ntuples_for_mask_fn(board, *mask_fn, i);
             output_ntuples[i] = ntuples;
             total_value += value;
         }
@@ -381,7 +373,7 @@ impl Agent {
                 // println!("{} {}", score, delta);
                 for (i, ntuple_set) in afterstate_ntuples.iter().enumerate() {
                     for ntuple in ntuple_set.iter() {
-                        self.ntuple_values[i][*ntuple as usize] += 0.1 * delta / 64.0;
+                        self.update_ntuple_value(i, *ntuple as usize, 0.1 * delta / 64.0);
                     }
                 }
                 return (board, score);
@@ -391,7 +383,7 @@ impl Agent {
             let delta = ((new_move_reward as f32) + new_afterstate_value) - afterstate_value;
             for (i, ntuple_set) in afterstate_ntuples.iter().enumerate() {
                 for ntuple in ntuple_set.iter() {
-                    self.ntuple_values[i][*ntuple as usize] += 0.1 * delta / 64.0;
+                    self.update_ntuple_value(i, *ntuple as usize, 0.1 * delta / 64.0);
                 }
             }
             // Set the current afterstate ntuples to the ntuples of the new best move.
@@ -404,27 +396,17 @@ impl Agent {
 
 const V_INIT: f32 = 370000.0;
 const NTHREADS: usize = 10;
-const EPOCH_SIZE: usize = 10000;
+const EPOCH_SIZE: usize = 1000;
 
 fn main() {
-    let mut ntuple_values: [Vec<f32>; NTUPLE_MASKS_FNS.len()] = [
-        vec![V_INIT; 16777216],
-        vec![V_INIT; 16777216],
-        vec![V_INIT; 16777216],
-        vec![V_INIT; 16777216],
-        vec![V_INIT; 16777216],
-        vec![V_INIT; 16777216],
-        vec![V_INIT; 16777216],
-        vec![V_INIT; 16777216],
-    ];
+    let mut ntuple_values = vec![V_INIT; NTUPLE_LUT_SIZE * NTUPLE_MASKS_FNS.len()];
     let mut epoch = 1;
     loop {
         let mut thread_handles = Vec::new();
         let start = SystemTime::now();
         for _ in 0..NTHREADS {
-            let ntuple_values = ntuple_values.clone();
             let mut agent = Agent {
-                ntuple_values: ntuple_values,
+                ntuple_raw_ptr: ntuple_values.as_mut_ptr(),
             };
             let handle = thread::spawn(|| {
                 let mut best_score = 0;
@@ -467,17 +449,17 @@ fn main() {
             all_best_score,
             all_total_score / (EPOCH_SIZE * NTHREADS) as u64
         );
-        // Merge the ntuple values by averaging.
-        for i in 0..NTUPLE_MASKS_FNS.len() {
-            for j in 0..ntuple_values[i].len() {
-                ntuple_values[i][j] = 0.0;
-                for agent in &agents {
-                    ntuple_values[i][j] += agent.ntuple_values[i][j];
-                }
-                ntuple_values[i][j] /= NTHREADS as f32;
-            }
-        }
-        println!("Merge complete.");
+        // // Merge the ntuple values by averaging.
+        // for i in 0..NTUPLE_MASKS_FNS.len() {
+        //     for j in 0..ntuple_values[i].len() {
+        //         ntuple_values[i][j] = 0.0;
+        //         for agent in &agents {
+        //             ntuple_values[i][j] += agent.ntuple_values[i][j];
+        //         }
+        //         ntuple_values[i][j] /= NTHREADS as f32;
+        //     }
+        // }
+        // println!("Merge complete.");
         epoch += 1;
     }
     // loop {
