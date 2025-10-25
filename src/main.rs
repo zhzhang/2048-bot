@@ -4,6 +4,8 @@ extern crate lazy_static;
 
 use rand::{seq::IteratorRandom, thread_rng, Rng};
 
+use std::fs::{File, OpenOptions};
+use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::SystemTime;
@@ -395,8 +397,9 @@ impl Agent {
 }
 
 const V_INIT: f32 = 370000.0;
-const NTHREADS: usize = 10;
-const EPOCH_SIZE: usize = 10000;
+const NTHREADS: usize = 32;
+const EPOCH_SIZE: usize = 100000;
+const CHECKPOINT_FILE: &str = "ntuple_values.bin";
 
 struct AgentOutput {
     count: u64,
@@ -405,8 +408,51 @@ struct AgentOutput {
     best_board: u64,
 }
 
+fn load_ntuple_values() -> Option<Vec<f32>> {
+    match File::open(CHECKPOINT_FILE) {
+        Ok(mut file) => {
+            let mut buffer = Vec::new();
+            if file.read_to_end(&mut buffer).is_ok() {
+                match bincode::deserialize::<Vec<f32>>(&buffer) {
+                    Ok(values) => {
+                        // Verify the size is correct
+                        if values.len() == NTUPLE_LUT_SIZE * NTUPLE_MASKS_FNS.len() {
+                            println!("Loaded ntuple values from {}", CHECKPOINT_FILE);
+                            return Some(values);
+                        } else {
+                            println!(
+                                "Warning: Checkpoint file has incorrect size. Starting fresh."
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        println!("Warning: Failed to deserialize checkpoint: {}. Starting fresh.", e);
+                    }
+                }
+            }
+        }
+        Err(_) => {
+            println!("No checkpoint file found. Starting fresh.");
+        }
+    }
+    None
+}
+
+fn save_ntuple_values(ntuple_values: &[f32]) -> Result<(), Box<dyn std::error::Error>> {
+    let serialized = bincode::serialize(ntuple_values)?;
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(CHECKPOINT_FILE)?;
+    file.write_all(&serialized)?;
+    file.sync_all()?;
+    Ok(())
+}
+
 fn main() {
-    let mut ntuple_values = vec![V_INIT; NTUPLE_LUT_SIZE * NTUPLE_MASKS_FNS.len()];
+    let mut ntuple_values = load_ntuple_values()
+        .unwrap_or_else(|| vec![V_INIT; NTUPLE_LUT_SIZE * NTUPLE_MASKS_FNS.len()]);
     let agent_output = Arc::new(Mutex::new(AgentOutput {
         count: 0,
         best_score: 0,
@@ -446,8 +492,17 @@ fn main() {
             last_count = agent_output.count;
             agent_output.total_score = 0;
             start = SystemTime::now();
+            
+            // Save checkpoint after each epoch
+            drop(agent_output);
+            if let Err(e) = save_ntuple_values(&ntuple_values) {
+                eprintln!("Warning: Failed to save checkpoint: {}", e);
+            } else {
+                println!("Checkpoint saved to {}", CHECKPOINT_FILE);
+            }
+        } else {
+            drop(agent_output);
         }
-        drop(agent_output)
     }
     // loop {
     //     // Wait for input from the user.
