@@ -10,12 +10,32 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::SystemTime;
 
+use axum::{
+    extract::State,
+    http::StatusCode,
+    response::{IntoResponse, Response},
+    routing::post,
+    Json, Router,
+};
+use serde::{Deserialize, Serialize};
+
 #[derive(Copy, Clone)]
 enum Move {
     Left,
     Right,
     Up,
     Down,
+}
+
+impl Move {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Move::Left => "left",
+            Move::Right => "right",
+            Move::Up => "up",
+            Move::Down => "down",
+        }
+    }
 }
 
 struct TransitionTable {
@@ -450,7 +470,114 @@ fn save_ntuple_values(ntuple_values: &[f32]) -> Result<(), Box<dyn std::error::E
     Ok(())
 }
 
-fn main() {
+// Web server types and functions
+
+#[derive(Deserialize)]
+struct BoardRequest {
+    board: Vec<Vec<u32>>,
+}
+
+#[derive(Serialize)]
+struct MoveResponse {
+    best_move: String,
+}
+
+#[derive(Serialize)]
+struct ErrorResponse {
+    error: String,
+}
+
+impl IntoResponse for ErrorResponse {
+    fn into_response(self) -> Response {
+        (StatusCode::BAD_REQUEST, Json(self)).into_response()
+    }
+}
+
+// Convert 2D array representation to internal board representation
+// The 2D array is expected to be in the form [[row0], [row1], [row2], [row3]]
+// where each value is the actual tile value (0, 2, 4, 8, 16, ...)
+fn board_from_2d_array(arr: Vec<Vec<u32>>) -> Result<u64, String> {
+    if arr.len() != 4 {
+        return Err("Board must have 4 rows".to_string());
+    }
+    
+    let mut board: u64 = 0;
+    for (row_idx, row) in arr.iter().enumerate() {
+        if row.len() != 4 {
+            return Err("Each row must have 4 columns".to_string());
+        }
+        
+        for (col_idx, &value) in row.iter().enumerate() {
+            let tile_idx = row_idx * 4 + col_idx;
+            let encoded_value = if value == 0 {
+                0u64
+            } else if value.is_power_of_two() && value >= 2 {
+                // Convert tile value to log2 representation
+                // 2 -> 1, 4 -> 2, 8 -> 3, 16 -> 4, etc.
+                value.trailing_zeros() as u64
+            } else {
+                return Err(format!("Invalid tile value: {}. Must be 0 or a power of 2 >= 2", value));
+            };
+            
+            board |= encoded_value << (4 * tile_idx);
+        }
+    }
+    
+    Ok(board)
+}
+
+// Find the best move for a given board
+fn get_best_move_for_board(board: u64, agent: &Agent) -> Option<Move> {
+    let mut best_value: f32 = f32::NEG_INFINITY;
+    let mut best_move: Option<Move> = None;
+    
+    for m in MOVES {
+        let (board_afterstate, reward) = execute_move(board, m);
+        if board_afterstate == board {
+            continue;
+        }
+        let (_, value) = agent.get_ntuples(board_afterstate);
+        let total_value = value + reward as f32;
+        if total_value > best_value {
+            best_value = total_value;
+            best_move = Some(m);
+        }
+    }
+    
+    best_move
+}
+
+// Shared state for web server
+struct AppState {
+    ntuple_values: Arc<Vec<f32>>,
+}
+
+async fn get_best_move(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<BoardRequest>,
+) -> Result<Json<MoveResponse>, ErrorResponse> {
+    // Convert 2D array to board representation
+    let board = board_from_2d_array(payload.board)
+        .map_err(|e| ErrorResponse { error: e })?;
+    
+    // Create agent with loaded values
+    let agent = Agent {
+        ntuple_raw_ptr: state.ntuple_values.as_ptr() as *mut f32,
+    };
+    
+    // Get best move
+    let best_move = get_best_move_for_board(board, &agent)
+        .ok_or_else(|| ErrorResponse {
+            error: "No valid moves available".to_string(),
+        })?;
+    
+    Ok(Json(MoveResponse {
+        best_move: best_move.as_str().to_string(),
+    }))
+}
+
+fn run_training() {
+    println!("Starting training mode...");
     let mut ntuple_values = load_ntuple_values()
         .unwrap_or_else(|| vec![V_INIT; NTUPLE_LUT_SIZE * NTUPLE_MASKS_FNS.len()]);
     let agent_output = Arc::new(Mutex::new(AgentOutput {
@@ -503,6 +630,48 @@ fn main() {
         } else {
             drop(agent_output);
         }
+    }
+}
+
+#[tokio::main]
+async fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    
+    // Check if server mode is requested
+    let server_mode = args.len() > 1 && args[1] == "--server";
+    
+    if server_mode {
+        println!("Starting web server mode on port 2048...");
+        
+        // Load trained model
+        let ntuple_values = load_ntuple_values()
+            .unwrap_or_else(|| {
+                println!("Warning: No trained model found. Using initial values.");
+                vec![V_INIT; NTUPLE_LUT_SIZE * NTUPLE_MASKS_FNS.len()]
+            });
+        
+        let state = Arc::new(AppState {
+            ntuple_values: Arc::new(ntuple_values),
+        });
+        
+        // Build router
+        let app = Router::new()
+            .route("/best-move", post(get_best_move))
+            .with_state(state);
+        
+        // Run server
+        let listener = tokio::net::TcpListener::bind("0.0.0.0:2048")
+            .await
+            .expect("Failed to bind to port 2048");
+        
+        println!("Server listening on http://0.0.0.0:2048");
+        println!("POST to /best-move with JSON body: {{\"board\": [[0, 2, 0, 0], [0, 0, 0, 0], [0, 0, 4, 0], [0, 0, 0, 0]]}}");
+        
+        axum::serve(listener, app)
+            .await
+            .expect("Server failed");
+    } else {
+        run_training();
     }
     // loop {
     //     // Wait for input from the user.
