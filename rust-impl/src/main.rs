@@ -8,7 +8,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::SystemTime;
+use std::time::Instant;
 
 use axum::{
     extract::State,
@@ -604,21 +604,26 @@ fn run_training() {
         });
     }
     let mut last_count = 0;
-    let mut start = SystemTime::now();
+    let mut start = Instant::now();
     loop {
         let mut agent_output = agent_output.lock().unwrap();
         if agent_output.count >= last_count + EPOCH_SIZE as u64 {
+            let games_played = agent_output.count - last_count;
+            let elapsed = start.elapsed();
+            let games_per_second = games_played as f64 / elapsed.as_secs_f64();
+
             print_game_state(agent_output.best_board);
             println!(
-                "Time: {:?} Games Played: {:?} Best Score: {:?} Average Score: {:?}",
-                start.elapsed().unwrap(),
+                "Time: {:?} Games Played: {:?} Games/s: {:.2} Best Score: {:?} Average Score: {:?}",
+                elapsed,
                 agent_output.count,
+                games_per_second,
                 agent_output.best_score,
-                agent_output.total_score / (agent_output.count - last_count) as u64
+                agent_output.total_score / games_played as u64
             );
             last_count = agent_output.count;
             agent_output.total_score = 0;
-            start = SystemTime::now();
+            start = Instant::now();
             
             // Save checkpoint after each epoch
             drop(agent_output);
