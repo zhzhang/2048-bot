@@ -7,9 +7,8 @@ DEVICE = triton.runtime.driver.active.get_active_torch_device()
 
 
 @triton.jit
-def add_kernel(
-    x_ptr,  # *Pointer* to first input vector.
-    y_ptr,  # *Pointer* to second input vector.
+def transpose_kernel(
+    boards_ptr,  # *Pointer* to first input vector.
     output_ptr,  # *Pointer* to output vector.
     n_elements,  # Size of the vector.
     BLOCK_SIZE: tl.constexpr,  # Number of elements each program should process.
@@ -28,41 +27,61 @@ def add_kernel(
     mask = offsets < n_elements
     # Load x and y from DRAM, masking out any extra elements in case the input is not a
     # multiple of the block size.
-    x = tl.load(x_ptr + offsets, mask=mask)
-    y = tl.load(y_ptr + offsets, mask=mask)
-    output = x + y
+    boards = tl.load(boards_ptr + offsets, mask=mask)
+    a1 = boards & 0xF0F00F0FF0F00F0F
+    a2 = boards & 0x0000F0F00000F0F0
+    a3 = boards & 0x0F0F00000F0F0000
+    a = a1 | (a2 << 12) | (a3 >> 12)
+    b1 = a & 0xFF00FF0000FF00FF
+    b2 = a & 0x00FF00FF00000000
+    b3 = a & 0x00000000FF00FF00
+    output = b1 | (b2 >> 24) | (b3 << 24)
     # Write x + y back to DRAM.
     tl.store(output_ptr + offsets, output, mask=mask)
 
 
-def add(x: torch.Tensor, y: torch.Tensor):
-    # We need to preallocate the output.
-    output = torch.empty_like(x)
-    assert x.device == DEVICE and y.device == DEVICE and output.device == DEVICE
-    n_elements = output.numel()
-    # The SPMD launch grid denotes the number of kernel instances that run in parallel.
-    # It is analogous to CUDA launch grids. It can be either Tuple[int], or Callable(metaparameters) -> Tuple[int].
-    # In this case, we use a 1D grid where the size is the number of blocks:
-    grid = lambda meta: (triton.cdiv(n_elements, meta["BLOCK_SIZE"]),)
-    # NOTE:
-    #  - Each torch.tensor object is implicitly converted into a pointer to its first element.
-    #  - `triton.jit`'ed functions can be indexed with a launch grid to obtain a callable GPU kernel.
-    #  - Don't forget to pass meta-parameters as keywords arguments.
-    add_kernel[grid](x, y, output, n_elements, BLOCK_SIZE=1024)
-    # We return a handle to z but, since `torch.cuda.synchronize()` hasn't been called, the kernel is still
-    # running asynchronously at this point.
+def transpose(boards: torch.Tensor) -> torch.Tensor:
+    output = torch.empty_like(boards)
+    transpose_kernel[1, 1](boards, output, boards.shape[0], BLOCK_SIZE=1024)
     return output
 
 
+@triton.jit
+def reduce_board(a, b):
+    return a << 4 | b
+
+
+@triton.jit
+def board_to_repr_kernel(
+    board_ptr,
+    output_ptr,
+):
+    board = tl.load(board_ptr + tl.arange(0, 16))
+    repr = tl.reduce(board, 0, reduce_board)
+    tl.store(output_ptr, repr)
+
+
+def print_board(board: torch.Tensor):
+    for i in range(16):
+        value = board >> (4 * i) & 0xF
+        if value == 0:
+            print("    .", end="")
+        else:
+            print(f"{1 << value:5}", end="")
+        if (i + 1) % 4 == 0:
+            print()
+
+
+def board_to_repr(board: torch.Tensor) -> torch.Tensor:
+    out = torch.empty_like(board)
+    board_to_repr_kernel[1, 1](board, out)
+    return out
+
+
 torch.manual_seed(0)
-size = 98432
-x = torch.rand(size, device=DEVICE)
-y = torch.rand(size, device=DEVICE)
-output_torch = x + y
-output_triton = add(x, y)
-print(output_torch)
-print(output_triton)
-print(
-    f"The maximum difference between torch and triton is "
-    f"{torch.max(torch.abs(output_torch - output_triton))}"
+board = torch.tensor(
+    [0, 2, 0, 4, 0, 6, 0, 8, 0, 10, 0, 12, 0, 14, 0, 16],
+    device=DEVICE,
+    dtype=torch.uint64,
 )
+print(board_to_repr(board))
