@@ -61,27 +61,35 @@ def board_to_repr_kernel(
     tl.store(output_ptr, repr)
 
 
-def print_board(board: torch.Tensor):
-    for i in range(16):
-        value = board >> (4 * i) & 0xF
-        if value == 0:
-            print("    .", end="")
-        else:
-            print(f"{1 << value:5}", end="")
-        if (i + 1) % 4 == 0:
-            print()
-
-
 def board_to_repr(board: torch.Tensor) -> torch.Tensor:
     out = torch.empty_like(board)
     board_to_repr_kernel[1, 1](board, out)
     return out
 
 
+@triton.jit
+def repr_to_board_kernel(
+    repr_ptr,
+    output_ptr,
+):
+    repr = tl.load(repr_ptr)
+    shifts = 64 - (tl.arange(1, 17) * 4)
+    board = repr >> shifts
+    tl.store(output_ptr + tl.arange(0, 16), board)
+
+
+def repr_to_board(repr: torch.Tensor) -> torch.Tensor:
+    out = torch.empty(16, device=DEVICE, dtype=torch.uint64)
+    repr_to_board_kernel[1, 1](repr, out)
+    return out
+
+
 torch.manual_seed(0)
 board = torch.tensor(
-    [0, 2, 0, 4, 0, 6, 0, 8, 0, 10, 0, 12, 0, 14, 0, 16],
+    [0, 2, 0, 4, 0, 6, 0, 8, 0, 10, 0, 12, 0, 14, 0, 15],
     device=DEVICE,
     dtype=torch.uint64,
 )
-print(board_to_repr(board))
+board_repr = board_to_repr(board)
+board_from_repr = repr_to_board(board_repr)
+print(board_from_repr)
