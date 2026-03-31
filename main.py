@@ -47,22 +47,19 @@ def transpose(boards: torch.Tensor) -> torch.Tensor:
 
 
 @triton.jit
-def reduce_board(a, b):
-    return a << 4 | b
-
-
-@triton.jit
 def board_to_repr_kernel(
     board_ptr,
     output_ptr,
 ):
     board = tl.load(board_ptr + tl.arange(0, 16))
-    repr = tl.reduce(board, 0, reduce_board)
-    tl.store(output_ptr, repr)
+    shifts = 64 - (tl.arange(1, 17) * 4)
+    board = board << shifts
+    repr_int = tl.sum(board, 0)
+    tl.store(output_ptr, repr_int)
 
 
 def board_to_repr(board: torch.Tensor) -> torch.Tensor:
-    out = torch.empty_like(board)
+    out = torch.tensor(0, device=DEVICE, dtype=torch.uint64)
     board_to_repr_kernel[1, 1](board, out)
     return out
 
@@ -74,7 +71,7 @@ def repr_to_board_kernel(
 ):
     repr = tl.load(repr_ptr)
     shifts = 64 - (tl.arange(1, 17) * 4)
-    board = repr >> shifts
+    board = (repr >> shifts) & 0xF
     tl.store(output_ptr + tl.arange(0, 16), board)
 
 
@@ -91,5 +88,7 @@ board = torch.tensor(
     dtype=torch.uint64,
 )
 board_repr = board_to_repr(board)
+print(board_repr)
+# tmp = torch.tensor(1, device=DEVICE, dtype=torch.uint64)
 board_from_repr = repr_to_board(board_repr)
 print(board_from_repr)
