@@ -15,6 +15,16 @@ def insert_random_tile_kernel(
     pid = tl.program_id(axis=0)
     block_start = pid * BLOCK_SIZE
     offsets = block_start + tl.arange(0, BLOCK_SIZE)
+    # Unpack boards into a 2D array of shape (BLOCK_SIZE, 16)
+    boards = tl.load(boards_ptr + offsets, mask=offsets < n_elements).reshape(
+        BLOCK_SIZE, 1
+    )
+    shifts = (60 - tl.arange(0, 16) * 4).reshape(1, 16)
+    x = (boards >> shifts) & 0xF
+    x = x == 0
+    x = x.sum(1)
+    r = tl.randint(42, offsets) % x
+    tl.store(boards_ptr + offsets, r, mask=offsets < n_elements)
 
 
 @triton.jit
@@ -93,17 +103,25 @@ def rotate_left_kernel(
 def board_to_repr_kernel(
     board_ptr,
     output_ptr,
+    n_elements,
+    BLOCK_SIZE: tl.constexpr,
 ):
-    board = tl.load(board_ptr + tl.arange(0, 16))
+    pid = tl.program_id(axis=0)
+    block_start = pid * BLOCK_SIZE
+    offsets = block_start + tl.arange(0, BLOCK_SIZE * 16)
+    boards = tl.load(board_ptr + offsets, mask=offsets < n_elements * 16).reshape(
+        BLOCK_SIZE, 16
+    )
     shifts = 64 - (tl.arange(1, 17) * 4)
-    board = board << shifts
-    repr_int = tl.sum(board, 0)
-    tl.store(output_ptr, repr_int)
+    boards = boards << shifts
+    reprs = tl.sum(boards, 1)
+    output_offsets = block_start + tl.arange(0, BLOCK_SIZE)
+    tl.store(output_ptr + output_offsets, reprs, mask=output_offsets < n_elements)
 
 
 def board_to_repr(board: torch.Tensor) -> torch.Tensor:
-    out = torch.tensor(0, device=DEVICE, dtype=torch.uint64)
-    board_to_repr_kernel[1, 1](board, out)
+    out = torch.empty(board.shape[0], device=DEVICE, dtype=torch.uint64)
+    board_to_repr_kernel[1, 1](board, out, board.shape[0], BLOCK_SIZE=1024)
     return out
 
 
@@ -111,16 +129,27 @@ def board_to_repr(board: torch.Tensor) -> torch.Tensor:
 def repr_to_board_kernel(
     repr_ptr,
     output_ptr,
+    n_elements,
+    BLOCK_SIZE: tl.constexpr,
 ):
-    repr = tl.load(repr_ptr)
+    pid = tl.program_id(axis=0)
+    block_start = pid * BLOCK_SIZE
+    offsets = block_start + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < n_elements
+    repr = tl.load(repr_ptr + offsets, mask=mask).reshape(BLOCK_SIZE, 1)
     shifts = 64 - (tl.arange(1, 17) * 4)
     board = (repr >> shifts) & 0xF
-    tl.store(output_ptr + tl.arange(0, 16), board)
+    output_offsets = offsets.reshape(BLOCK_SIZE, 1) * 16 + tl.arange(0, 16).reshape(
+        1, 16
+    )
+    tl.store(output_ptr + output_offsets, board, mask=mask.reshape(BLOCK_SIZE, 1))
 
 
 def repr_to_board(repr: torch.Tensor) -> torch.Tensor:
-    out = torch.empty(16, device=DEVICE, dtype=torch.uint64)
-    repr_to_board_kernel[1, 1](repr, out)
+    out = torch.empty((repr.shape[0], 16), device=DEVICE, dtype=torch.uint64)
+    repr_to_board_kernel[(triton.cdiv(repr.shape[0], 1024),)](
+        repr, out, repr.shape[0], BLOCK_SIZE=1024
+    )
     return out
 
 
@@ -173,6 +202,26 @@ def randint() -> torch.Tensor:
     output = torch.empty(128, device=DEVICE, dtype=torch.uint32)
     test_rand[1, 1](output)
     return output
+
+
+boards = torch.tensor(
+    [
+        [0, 2, 0, 4, 0, 6, 0, 8, 0, 10, 0, 12, 0, 14, 0, 15],
+        [8, 0, 7, 0, 6, 0, 5, 0, 4, 0, 3, 0, 2, 0, 1, 0],
+    ],
+    device=DEVICE,
+    dtype=torch.uint64,
+)
+print(boards.shape)
+board_reprs = board_to_repr(boards)
+print(boards)
+print(board_reprs)
+tmp = repr_to_board(board_reprs)
+print(tmp)
+inserted_boards = insert_random_tile_kernel[1, 1](
+    boards, boards.shape[0], BLOCK_SIZE=1024
+)
+print(inserted_boards)
 
 
 # board = torch.tensor(
