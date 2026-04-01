@@ -9,6 +9,7 @@ DEVICE = triton.runtime.driver.active.get_active_torch_device()
 @triton.jit
 def insert_random_tile_kernel(
     boards_ptr,
+    tmp_ptr,
     n_elements,
     BLOCK_SIZE: tl.constexpr,
 ):
@@ -21,10 +22,26 @@ def insert_random_tile_kernel(
     )
     shifts = (60 - tl.arange(0, 16) * 4).reshape(1, 16)
     x = (boards >> shifts) & 0xF
-    x = x == 0
-    x = x.sum(1)
-    r = tl.randint(42, offsets) % x
-    tl.store(boards_ptr + offsets, r, mask=offsets < n_elements)
+    zeros = x == 0
+    tmp_offsets = tl.arange(0, BLOCK_SIZE * 16)
+    cs = zeros.cumsum(1)
+    tl.store(
+        tmp_ptr + tmp_offsets,
+        cs.reshape(BLOCK_SIZE * 16),
+        mask=tmp_offsets < n_elements * 16,
+    )
+    num_zeros = zeros.sum(1)
+    r = (tl.randint(42, offsets) % num_zeros) + 1
+    # r = (cs == r).argmax(1)
+    # tl.store(boards_ptr + offsets, r, mask=offsets < n_elements)
+
+
+def insert_random_tile(boards: torch.Tensor) -> torch.Tensor:
+    inserted_boards = torch.empty_like(boards)
+    tmp = torch.empty((boards.shape[0], 16), device=DEVICE, dtype=torch.uint64)
+    insert_random_tile_kernel[1, 1](boards, tmp, boards.shape[0], BLOCK_SIZE=1024)
+    print(tmp)
+    return inserted_boards, tmp
 
 
 @triton.jit
@@ -206,32 +223,13 @@ def randint() -> torch.Tensor:
 
 boards = torch.tensor(
     [
-        [0, 2, 0, 4, 0, 6, 0, 8, 0, 10, 0, 12, 0, 14, 0, 15],
+        [0, 2, 0, 4, 0, 6, 0, 8, 0, 10, 0, 12, 0, 0, 0, 15],
         [8, 0, 7, 0, 6, 0, 5, 0, 4, 0, 3, 0, 2, 0, 1, 0],
     ],
     device=DEVICE,
     dtype=torch.uint64,
 )
-print(boards.shape)
 board_reprs = board_to_repr(boards)
-print(boards)
 print(board_reprs)
-tmp = repr_to_board(board_reprs)
-print(tmp)
-inserted_boards = insert_random_tile_kernel[1, 1](
-    boards, boards.shape[0], BLOCK_SIZE=1024
-)
-print(inserted_boards)
-
-
-# board = torch.tensor(
-#     [0, 2, 0, 4, 0, 6, 0, 8, 0, 10, 0, 12, 0, 14, 0, 15],
-#     device=DEVICE,
-#     dtype=torch.uint64,
-# )
-# board_repr = board_to_repr(board)
-# board_repr = board_repr.unsqueeze(0)
-# print(board_repr)
-# board_repr = transpose(board_repr)
-# board = repr_to_board(board_repr)
-# print(board)
+inserted_boards = insert_random_tile(board_reprs)
+print(board_reprs)
