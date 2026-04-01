@@ -7,6 +7,17 @@ DEVICE = triton.runtime.driver.active.get_active_torch_device()
 
 
 @triton.jit
+def insert_random_tile_kernel(
+    boards_ptr,
+    n_elements,
+    BLOCK_SIZE: tl.constexpr,
+):
+    pid = tl.program_id(axis=0)
+    block_start = pid * BLOCK_SIZE
+    offsets = block_start + tl.arange(0, BLOCK_SIZE)
+
+
+@triton.jit
 def transpose_kernel(
     boards_ptr,  # *Pointer* to first input vector.
     output_ptr,  # *Pointer* to output vector.
@@ -47,6 +58,38 @@ def transpose(boards: torch.Tensor) -> torch.Tensor:
 
 
 @triton.jit
+def flip_horizontal_kernel(
+    boards_ptr,
+    output_ptr,
+    n_elements,
+    BLOCK_SIZE: tl.constexpr,
+):
+    pid = tl.program_id(axis=0)
+    block_start = pid * BLOCK_SIZE
+    offsets = block_start + tl.arange(0, BLOCK_SIZE)
+    boards = tl.load(boards_ptr + offsets, mask=offsets < n_elements)
+    a1 = boards & 0x000F000F000F000F
+    a2 = boards & 0x00F000F000F000F0
+    a3 = boards & 0x0F000F000F000F00
+    a4 = boards & 0xF000F000F000F000
+    output = a1 | (a2 << 4) | (a3 << 8) | (a4 << 12)
+    tl.store(output_ptr + offsets, output, mask=offsets < n_elements)
+
+
+@triton.jit
+def rotate_left_kernel(
+    boards_ptr,
+    output_ptr,
+    n_elements,
+    BLOCK_SIZE: tl.constexpr,
+):
+    pid = tl.program_id(axis=0)
+    block_start = pid * BLOCK_SIZE
+    offsets = block_start + tl.arange(0, BLOCK_SIZE)
+    boards = tl.load(boards_ptr + offsets, mask=offsets < n_elements)
+
+
+@triton.jit
 def board_to_repr_kernel(
     board_ptr,
     output_ptr,
@@ -81,14 +124,65 @@ def repr_to_board(repr: torch.Tensor) -> torch.Tensor:
     return out
 
 
-torch.manual_seed(0)
-board = torch.tensor(
-    [0, 2, 0, 4, 0, 6, 0, 8, 0, 10, 0, 12, 0, 14, 0, 15],
-    device=DEVICE,
-    dtype=torch.uint64,
-)
-board_repr = board_to_repr(board)
-print(board_repr)
-# tmp = torch.tensor(1, device=DEVICE, dtype=torch.uint64)
-board_from_repr = repr_to_board(board_repr)
-print(board_from_repr)
+def generate_transition_tables(device: torch.device) -> tuple[torch.Tensor, ...]:
+    left_rows = torch.empty(65536, dtype=torch.uint16)
+    left_reward = torch.empty(65536, dtype=torch.uint32)
+
+    for line_repr in range(65536):
+        row = [(line_repr >> (4 * idx)) & 0xF for idx in range(4)]
+
+        compact = [value for value in row if value != 0]
+        merged: list[int] = []
+        reward = 0
+        cursor = 0
+        while cursor < len(compact):
+            current = compact[cursor]
+            if cursor + 1 < len(compact) and compact[cursor + 1] == current:
+                current += 1
+                reward += 1 << current
+                cursor += 2
+            else:
+                cursor += 1
+            merged.append(current)
+
+        merged.extend([0] * (4 - len(merged)))
+        new_line_repr = 0
+        for i, value in enumerate(merged):
+            new_line_repr |= value << (4 * i)
+        left_rows[line_repr] = new_line_repr
+        left_reward[line_repr] = reward
+
+    return (
+        left_rows.to(device=device),
+        left_reward.to(device=device),
+    )
+
+
+@triton.jit
+def test_rand(
+    output_ptr,
+):
+    a, b, c, d = tl.randint4x(0, tl.arange(0, 16))
+    tl.store(output_ptr + tl.arange(0, 32), a)
+    tl.store(output_ptr + tl.arange(16, 32), b)
+    tl.store(output_ptr + tl.arange(32, 48), c)
+    tl.store(output_ptr + tl.arange(48, 64), d)
+
+
+def randint() -> torch.Tensor:
+    output = torch.empty(128, device=DEVICE, dtype=torch.uint32)
+    test_rand[1, 1](output)
+    return output
+
+
+# board = torch.tensor(
+#     [0, 2, 0, 4, 0, 6, 0, 8, 0, 10, 0, 12, 0, 14, 0, 15],
+#     device=DEVICE,
+#     dtype=torch.uint64,
+# )
+# board_repr = board_to_repr(board)
+# board_repr = board_repr.unsqueeze(0)
+# print(board_repr)
+# board_repr = transpose(board_repr)
+# board = repr_to_board(board_repr)
+# print(board)
