@@ -22,18 +22,19 @@ def insert_random_tile_kernel(
     )
     shifts = (60 - tl.arange(0, 16) * 4).reshape(1, 16)
     x = (boards >> shifts) & 0xF
-    zeros = x == 0
+    zeros = (x == 0).to(tl.uint64)
     tmp_offsets = tl.arange(0, BLOCK_SIZE * 16)
+    num_zeros = zeros.sum(1)
     cs = zeros.cumsum(1)
+    r = ((tl.randint(42, offsets) % num_zeros) + 1).to(tl.uint64)
+    # print("shape of r", r.shape)
+    tl.store(boards_ptr + offsets, r, mask=offsets < n_elements)
+    blah = cs == 0
     tl.store(
         tmp_ptr + tmp_offsets,
         cs.reshape(BLOCK_SIZE * 16),
         mask=tmp_offsets < n_elements * 16,
     )
-    num_zeros = zeros.sum(1)
-    r = (tl.randint(42, offsets) % num_zeros) + 1
-    # r = (cs == r).argmax(1)
-    # tl.store(boards_ptr + offsets, r, mask=offsets < n_elements)
 
 
 def insert_random_tile(boards: torch.Tensor) -> torch.Tensor:
@@ -41,7 +42,25 @@ def insert_random_tile(boards: torch.Tensor) -> torch.Tensor:
     tmp = torch.empty((boards.shape[0], 16), device=DEVICE, dtype=torch.uint64)
     insert_random_tile_kernel[1, 1](boards, tmp, boards.shape[0], BLOCK_SIZE=1024)
     print(tmp)
+    print(inserted_boards)
     return inserted_boards, tmp
+
+
+boards = torch.tensor(
+    [
+        # [0, 2, 0, 4, 0, 6, 0, 8, 0, 10, 0, 12, 0, 0, 0, 15],
+        # [8, 0, 7, 0, 6, 0, 5, 0, 4, 0, 3, 0, 2, 0, 1, 0],
+        # [8, 7, 6, 5, 4, 3, 2, 1, 0, 0, 0, 0, 0, 0, 0, 0],
+        [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+        [1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+        [1, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+    ],
+    device=DEVICE,
+    dtype=torch.uint64,
+)
 
 
 @triton.jit
@@ -221,15 +240,6 @@ def randint() -> torch.Tensor:
     return output
 
 
-boards = torch.tensor(
-    [
-        [0, 2, 0, 4, 0, 6, 0, 8, 0, 10, 0, 12, 0, 0, 0, 15],
-        [8, 0, 7, 0, 6, 0, 5, 0, 4, 0, 3, 0, 2, 0, 1, 0],
-    ],
-    device=DEVICE,
-    dtype=torch.uint64,
-)
 board_reprs = board_to_repr(boards)
-print(board_reprs)
 inserted_boards = insert_random_tile(board_reprs)
 print(board_reprs)
