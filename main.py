@@ -1,5 +1,5 @@
 import torch
-
+import time
 import triton
 import triton.language as tl
 
@@ -10,6 +10,7 @@ DEVICE = triton.runtime.driver.active.get_active_torch_device()
 def insert_random_tile_kernel(
     boards_ptr,
     n_elements,
+    seed,
     BLOCK_SIZE: tl.constexpr,
 ):
     pid = tl.program_id(axis=0)
@@ -22,8 +23,7 @@ def insert_random_tile_kernel(
     zeros = (x == 0).to(tl.uint64)
     num_zeros = zeros.sum(1)
     cs = zeros.cumsum(1)
-    # r = ((tl.randint4x(42, offsets) % num_zeros) + 1).expand_dims(1)
-    r1, r2, _, _ = tl.randint4x(42, offsets)
+    r1, r2, _, _ = tl.randint4x(seed, offsets)
     r_idx = ((r1 % num_zeros) + 1).expand_dims(1)
     vals = tl.full((BLOCK_SIZE,), 1, dtype=tl.uint64)
     r_val = (r2 % 10) < 1
@@ -36,27 +36,9 @@ def insert_random_tile_kernel(
 
 
 def insert_random_tile(boards: torch.Tensor) -> torch.Tensor:
-    inserted_boards = torch.empty_like(boards)
-    insert_random_tile_kernel[1, 1](boards, boards.shape[0], BLOCK_SIZE=1024)
-    print(boards)
-    return inserted_boards
-
-
-boards = torch.tensor(
-    [
-        # [0, 2, 0, 4, 0, 6, 0, 8, 0, 10, 0, 12, 0, 0, 0, 15],
-        # [8, 0, 7, 0, 6, 0, 5, 0, 4, 0, 3, 0, 2, 0, 1, 0],
-        # [8, 7, 6, 5, 4, 3, 2, 1, 0, 0, 0, 0, 0, 0, 0, 0],
-        [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-        [1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-        [1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-        [0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
-        [1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
-        [1, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
-    ],
-    device=DEVICE,
-    dtype=torch.uint64,
-)
+    insert_random_tile_kernel[1, 1](
+        boards, boards.shape[0], int(time.time() * 1000), BLOCK_SIZE=1024
+    )
 
 
 @triton.jit
@@ -219,24 +201,10 @@ def generate_transition_tables(device: torch.device) -> tuple[torch.Tensor, ...]
     )
 
 
-@triton.jit
-def test_rand(
-    output_ptr,
-):
-    a, b, c, d = tl.randint4x(0, tl.arange(0, 16))
-    tl.store(output_ptr + tl.arange(0, 32), a)
-    tl.store(output_ptr + tl.arange(16, 32), b)
-    tl.store(output_ptr + tl.arange(32, 48), c)
-    tl.store(output_ptr + tl.arange(48, 64), d)
+boards = torch.zeros(10, 16, device=DEVICE, dtype=torch.uint64)
 
-
-def randint() -> torch.Tensor:
-    output = torch.empty(128, device=DEVICE, dtype=torch.uint32)
-    test_rand[1, 1](output)
-    return output
-
-
-print(boards)
 board_reprs = board_to_repr(boards)
-inserted_boards = insert_random_tile(board_reprs)
-print(repr_to_board(board_reprs))
+insert_random_tile(board_reprs)
+insert_random_tile(board_reprs)
+tmp = repr_to_board(board_reprs)
+print(tmp)
