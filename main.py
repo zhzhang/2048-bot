@@ -9,7 +9,6 @@ DEVICE = triton.runtime.driver.active.get_active_torch_device()
 @triton.jit
 def insert_random_tile_kernel(
     boards_ptr,
-    tmp_ptr,
     n_elements,
     BLOCK_SIZE: tl.constexpr,
 ):
@@ -21,32 +20,26 @@ def insert_random_tile_kernel(
     shifts = 60 - tl.arange(0, 16) * 4
     x = (boards >> shifts) & 0xF
     zeros = (x == 0).to(tl.uint64)
-    tmp_offsets = tl.arange(0, BLOCK_SIZE)[:, None] * 16 + tl.arange(0, 16)
     num_zeros = zeros.sum(1)
     cs = zeros.cumsum(1)
     # r = ((tl.randint4x(42, offsets) % num_zeros) + 1).expand_dims(1)
     r1, r2, _, _ = tl.randint4x(42, offsets)
     r_idx = ((r1 % num_zeros) + 1).expand_dims(1)
     vals = tl.full((BLOCK_SIZE,), 1, dtype=tl.uint64)
-    r_val = (r2 % 2) < 1
+    r_val = (r2 % 10) < 1
     vals = vals << r_val
     idx = (cs == r_idx).argmax(1)
-    vals = vals << (4 * idx)
+    vals = vals << (60 - 4 * idx)
     boards = boards.ravel()
     boards = boards | vals
     tl.store(boards_ptr + offsets, boards, mask=offsets < n_elements)
-    # tl.store(
-    #     tmp_ptr + tmp_offsets,
-    #     blah,
-    #     mask=tmp_offsets < n_elements * 16,
-    # )
 
 
 def insert_random_tile(boards: torch.Tensor) -> torch.Tensor:
     inserted_boards = torch.empty_like(boards)
-    tmp = torch.empty((boards.shape[0], 16), device=DEVICE, dtype=torch.uint64)
-    insert_random_tile_kernel[1, 1](boards, tmp, boards.shape[0], BLOCK_SIZE=1024)
-    return inserted_boards, tmp
+    insert_random_tile_kernel[1, 1](boards, boards.shape[0], BLOCK_SIZE=1024)
+    print(boards)
+    return inserted_boards
 
 
 boards = torch.tensor(
