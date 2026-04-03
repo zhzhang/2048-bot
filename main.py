@@ -17,10 +17,8 @@ def insert_random_tile_kernel(
     block_start = pid * BLOCK_SIZE
     offsets = block_start + tl.arange(0, BLOCK_SIZE)
     # Unpack boards into a 2D array of shape (BLOCK_SIZE, 16)
-    boards = tl.load(boards_ptr + offsets, mask=offsets < n_elements).reshape(
-        BLOCK_SIZE, 1
-    )
-    shifts = (60 - tl.arange(0, 16) * 4).reshape(1, 16)
+    boards = tl.load(boards_ptr + offsets, mask=offsets < n_elements).expand_dims(1)
+    shifts = 60 - tl.arange(0, 16) * 4
     x = (boards >> shifts) & 0xF
     zeros = (x == 0).to(tl.uint64)
     tmp_offsets = tl.arange(0, BLOCK_SIZE * 16)
