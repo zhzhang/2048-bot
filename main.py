@@ -4,6 +4,7 @@ import triton
 import triton.language as tl
 
 DEVICE = triton.runtime.driver.active.get_active_torch_device()
+MOVE_LUT_SIZE = 65536 // 2
 
 
 @triton.jit
@@ -86,7 +87,7 @@ def move_left(
 ):
     shifts = 48 - (tl.arange(0, 4) * 16)
     rows = ((boards >> shifts) & 0xFFFF).to(tl.uint16).ravel()
-    new_rows = tl.gather(move_lut, rows, axis=0).view(BLOCK_SIZE, 4)
+    new_rows = tl.gather(move_lut, rows, axis=0).reshape(BLOCK_SIZE, 4)
     rewards = tl.gather(move_rewards, rows, axis=0)
     new_boards = tl.sum(new_rows << shifts, 1)
     return new_boards, rewards
@@ -105,7 +106,7 @@ def do_all_moves_kernel(
     block_start = pid * BLOCK_SIZE
     offsets = block_start + tl.arange(0, BLOCK_SIZE)
     boards = tl.load(boards_ptr + offsets, mask=offsets < n_elements).expand_dims(1)
-    lut_offsets = tl.arange(0, 65536)
+    lut_offsets = tl.arange(0, 32768)  # MOVE_LUT_SIZE
     move_lut = tl.load(move_lut_ptr + lut_offsets)
     move_rewards = tl.load(move_rewards_ptr + lut_offsets)
     move_left_boards, move_left_rewards = move_left(
@@ -123,10 +124,7 @@ def do_all_moves_kernel(
     move_down_boards, move_down_rewards = move_left(
         boards_d, move_lut, move_rewards, BLOCK_SIZE
     )
-    output_offsets = block_start + tl.arange(0, BLOCK_SIZE)
-    tl.store(
-        output_ptr + output_offsets, move_left_boards, mask=output_offsets < n_elements
-    )
+    tl.store(output_ptr + offsets, move_left_boards, mask=offsets < n_elements)
     # tl.store(
     #     output_ptr + output_offsets, move_right_boards, mask=output_offsets < n_elements
     # )
@@ -141,7 +139,7 @@ def do_all_moves_kernel(
 def do_all_moves(
     boards: torch.Tensor, move_lut: torch.Tensor, move_rewards: torch.Tensor
 ) -> torch.Tensor:
-    output = torch.empty(boards.shape[0], 4, device=DEVICE, dtype=torch.uint64)
+    output = torch.empty_like(boards)
     do_all_moves_kernel[1, 1](
         boards, move_lut, move_rewards, output, boards.shape[0], BLOCK_SIZE=1024
     )
@@ -202,12 +200,50 @@ def repr_to_board(repr: torch.Tensor) -> torch.Tensor:
     return out
 
 
-def generate_transition_tables(device: torch.device) -> tuple[torch.Tensor, ...]:
-    left_rows = torch.empty(65536, dtype=torch.uint16)
-    left_reward = torch.empty(65536, dtype=torch.uint32)
+def print_boards(boards: torch.Tensor):
+    if boards.ndim == 1:
+        if boards.numel() != 16:
+            raise ValueError("Expected a single board with 16 cells.")
+        boards = boards.reshape(1, 4, 4)
+    elif boards.ndim == 2:
+        if boards.shape[1] != 16:
+            raise ValueError("Expected boards with shape (n, 16).")
+        boards = boards.reshape(-1, 4, 4)
+    elif boards.ndim == 3:
+        if boards.shape[1:] != (4, 4):
+            raise ValueError("Expected boards with shape (n, 4, 4).")
+    else:
+        raise ValueError("Expected boards with shape (16,), (n, 16), or (n, 4, 4).")
 
-    for line_repr in range(65536):
-        row = [(line_repr >> (4 * idx)) & 0xF for idx in range(4)]
+    boards_cpu = boards.detach().to("cpu")
+    cell_width = 6
+
+    def format_cell(value: int) -> str:
+        return "." if value == 0 else str(1 << value)
+
+    rendered_boards: list[list[str]] = []
+    for board in boards_cpu:
+        rendered_rows: list[str] = []
+        for row in board:
+            cells = [format_cell(int(cell)) for cell in row.tolist()]
+            rendered_rows.append(" ".join(f"{cell:>{cell_width}}" for cell in cells))
+        rendered_boards.append(rendered_rows)
+
+    board_separator = "      "
+    for line_idx in range(len(rendered_boards[0])):
+        print(
+            board_separator.join(
+                board_lines[line_idx] for board_lines in rendered_boards
+            )
+        )
+
+
+def generate_transition_tables(device: torch.device) -> tuple[torch.Tensor, ...]:
+    left_rows = torch.empty(MOVE_LUT_SIZE, dtype=torch.uint16)
+    left_reward = torch.empty(MOVE_LUT_SIZE, dtype=torch.uint16)
+
+    for line_repr in range(MOVE_LUT_SIZE):
+        row = [(line_repr >> (12 - 4 * idx)) & 0xF for idx in range(4)]
 
         compact = [value for value in row if value != 0]
         merged: list[int] = []
@@ -217,16 +253,18 @@ def generate_transition_tables(device: torch.device) -> tuple[torch.Tensor, ...]
             current = compact[cursor]
             if cursor + 1 < len(compact) and compact[cursor + 1] == current:
                 current += 1
-                reward += 1 << current
+                reward += 1
                 cursor += 2
             else:
                 cursor += 1
             merged.append(current)
+        if len(merged) > 0 and max(merged) > 15:
+            continue
 
         merged.extend([0] * (4 - len(merged)))
         new_line_repr = 0
         for i, value in enumerate(merged):
-            new_line_repr |= value << (4 * i)
+            new_line_repr |= value << (12 - 4 * i)
         left_rows[line_repr] = new_line_repr
         left_reward[line_repr] = reward
 
@@ -236,8 +274,13 @@ def generate_transition_tables(device: torch.device) -> tuple[torch.Tensor, ...]
     )
 
 
-boards = torch.zeros(10, 16, device=DEVICE, dtype=torch.uint64)
+boards = torch.zeros(3, device=DEVICE, dtype=torch.uint64)
+insert_random_tile(boards)
+insert_random_tile(boards)
+
+print_boards(repr_to_board(boards))
+print("-" * 100)
 
 move_lut, move_rewards = generate_transition_tables(DEVICE)
 all_moves = do_all_moves(boards, move_lut, move_rewards)
-print(all_moves)
+print_boards(repr_to_board(all_moves))
