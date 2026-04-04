@@ -88,7 +88,7 @@ def move_left(
     rows = ((boards >> shifts) & 0xFFFF).to(tl.uint16).ravel()
     new_rows = tl.gather(move_lut, rows, axis=0).view(BLOCK_SIZE, 4)
     rewards = tl.gather(move_rewards, rows, axis=0)
-    new_boards = boards | (new_rows << shifts)
+    new_boards = tl.sum(new_rows << shifts, 1)
     return new_boards, rewards
 
 
@@ -127,15 +127,15 @@ def do_all_moves_kernel(
     tl.store(
         output_ptr + output_offsets, move_left_boards, mask=output_offsets < n_elements
     )
-    tl.store(
-        output_ptr + output_offsets, move_right_boards, mask=output_offsets < n_elements
-    )
-    tl.store(
-        output_ptr + output_offsets, move_up_boards, mask=output_offsets < n_elements
-    )
-    tl.store(
-        output_ptr + output_offsets, move_down_boards, mask=output_offsets < n_elements
-    )
+    # tl.store(
+    #     output_ptr + output_offsets, move_right_boards, mask=output_offsets < n_elements
+    # )
+    # tl.store(
+    #     output_ptr + output_offsets, move_up_boards, mask=output_offsets < n_elements
+    # )
+    # tl.store(
+    #     output_ptr + output_offsets, move_down_boards, mask=output_offsets < n_elements
+    # )
 
 
 def do_all_moves(
