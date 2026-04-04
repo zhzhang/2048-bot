@@ -65,7 +65,7 @@ def flip_horizontal(
     a2 = boards & 0x00F000F000F000F0
     a3 = boards & 0x0F000F000F000F00
     a4 = boards & 0xF000F000F000F000
-    output = a1 | (a2 << 4) | (a3 << 8) | (a4 << 12)
+    output = (a1 << 12) | (a2 << 4) | (a3 >> 4) | (a4 >> 12)
     return output
 
 
@@ -86,8 +86,8 @@ def move_left(
     BLOCK_SIZE: tl.constexpr,
 ):
     shifts = 48 - (tl.arange(0, 4) * 16)
-    rows = ((boards >> shifts) & 0xFFFF).to(tl.uint16).ravel()
-    new_rows = tl.gather(move_lut, rows, axis=0).reshape(BLOCK_SIZE, 4)
+    rows = ((boards >> shifts) & 0xFFFF).ravel()
+    new_rows = tl.gather(move_lut, rows, axis=0).to(tl.uint64).reshape(BLOCK_SIZE, 4)
     rewards = tl.gather(move_rewards, rows, axis=0)
     new_boards = tl.sum(new_rows << shifts, 1)
     return new_boards, rewards
@@ -116,6 +116,7 @@ def do_all_moves_kernel(
     move_right_boards, move_right_rewards = move_left(
         boards_r, move_lut, move_rewards, BLOCK_SIZE
     )
+    move_right_boards = flip_horizontal(move_right_boards)
     boards_u = transpose(boards)
     move_up_boards, move_up_rewards = move_left(
         boards_u, move_lut, move_rewards, BLOCK_SIZE
@@ -124,7 +125,7 @@ def do_all_moves_kernel(
     move_down_boards, move_down_rewards = move_left(
         boards_d, move_lut, move_rewards, BLOCK_SIZE
     )
-    tl.store(output_ptr + offsets, move_left_boards, mask=offsets < n_elements)
+    tl.store(output_ptr + offsets, move_right_boards, mask=offsets < n_elements)
     # tl.store(
     #     output_ptr + output_offsets, move_right_boards, mask=output_offsets < n_elements
     # )
