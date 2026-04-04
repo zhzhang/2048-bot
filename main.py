@@ -121,11 +121,13 @@ def do_all_moves_kernel(
     move_up_boards, move_up_rewards = move_left(
         boards_u, move_lut, move_rewards, BLOCK_SIZE
     )
-    boards_d = transpose(boards_r)
+    move_up_boards = transpose(move_up_boards)
+    boards_d = flip_horizontal(boards_u)
     move_down_boards, move_down_rewards = move_left(
         boards_d, move_lut, move_rewards, BLOCK_SIZE
     )
-    tl.store(output_ptr + offsets, move_right_boards, mask=offsets < n_elements)
+    move_down_boards = transpose(flip_horizontal(move_down_boards))
+    tl.store(output_ptr + offsets, move_down_boards, mask=offsets < n_elements)
     # tl.store(
     #     output_ptr + output_offsets, move_right_boards, mask=output_offsets < n_elements
     # )
