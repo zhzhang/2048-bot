@@ -42,27 +42,9 @@ def insert_random_tile(boards: torch.Tensor) -> torch.Tensor:
 
 
 @triton.jit
-def transpose_kernel(
-    boards_ptr,  # *Pointer* to first input vector.
-    output_ptr,  # *Pointer* to output vector.
-    n_elements,  # Size of the vector.
-    BLOCK_SIZE: tl.constexpr,  # Number of elements each program should process.
-    # NOTE: `constexpr` so it can be used as a shape value.
+def transpose(
+    boards,
 ):
-    # There are multiple 'programs' processing different data. We identify which program
-    # we are here:
-    pid = tl.program_id(axis=0)  # We use a 1D launch grid so axis is 0.
-    # This program will process inputs that are offset from the initial data.
-    # For instance, if you had a vector of length 256 and block_size of 64, the programs
-    # would each access the elements [0:64, 64:128, 128:192, 192:256].
-    # Note that offsets is a list of pointers:
-    block_start = pid * BLOCK_SIZE
-    offsets = block_start + tl.arange(0, BLOCK_SIZE)
-    # Create a mask to guard memory operations against out-of-bounds accesses.
-    mask = offsets < n_elements
-    # Load x and y from DRAM, masking out any extra elements in case the input is not a
-    # multiple of the block size.
-    boards = tl.load(boards_ptr + offsets, mask=mask)
     a1 = boards & 0xF0F00F0FF0F00F0F
     a2 = boards & 0x0000F0F00000F0F0
     a3 = boards & 0x0F0F00000F0F0000
@@ -71,38 +53,50 @@ def transpose_kernel(
     b2 = a & 0x00FF00FF00000000
     b3 = a & 0x00000000FF00FF00
     output = b1 | (b2 >> 24) | (b3 << 24)
-    # Write x + y back to DRAM.
-    tl.store(output_ptr + offsets, output, mask=mask)
-
-
-def transpose(boards: torch.Tensor) -> torch.Tensor:
-    output = torch.empty_like(boards)
-    transpose_kernel[1, 1](boards, output, boards.shape[0], BLOCK_SIZE=1024)
     return output
 
 
 @triton.jit
-def flip_horizontal_kernel(
-    boards_ptr,
-    output_ptr,
-    n_elements,
-    BLOCK_SIZE: tl.constexpr,
+def flip_horizontal(
+    boards,
 ):
-    pid = tl.program_id(axis=0)
-    block_start = pid * BLOCK_SIZE
-    offsets = block_start + tl.arange(0, BLOCK_SIZE)
-    boards = tl.load(boards_ptr + offsets, mask=offsets < n_elements)
     a1 = boards & 0x000F000F000F000F
     a2 = boards & 0x00F000F000F000F0
     a3 = boards & 0x0F000F000F000F00
     a4 = boards & 0xF000F000F000F000
     output = a1 | (a2 << 4) | (a3 << 8) | (a4 << 12)
-    tl.store(output_ptr + offsets, output, mask=offsets < n_elements)
+    return output
 
 
 @triton.jit
-def rotate_left_kernel(
+def rotate_left(
     boards_ptr,
+    n_elements,
+    BLOCK_SIZE: tl.constexpr,
+):
+    boards
+
+
+@triton.jit
+def move_left(
+    boards,
+    move_lut,
+    move_rewards,
+    BLOCK_SIZE: tl.constexpr,
+):
+    shifts = 48 - (tl.arange(0, 4) * 16)
+    rows = ((boards >> shifts) & 0xFFFF).to(tl.uint16).ravel()
+    new_rows = tl.gather(move_lut, rows, axis=0).view(BLOCK_SIZE, 4)
+    rewards = tl.gather(move_rewards, rows, axis=0)
+    new_boards = boards | (new_rows << shifts)
+    return new_boards, rewards
+
+
+@triton.jit
+def do_all_moves_kernel(
+    boards_ptr,
+    move_lut_ptr,
+    move_rewards_ptr,
     output_ptr,
     n_elements,
     BLOCK_SIZE: tl.constexpr,
@@ -110,7 +104,48 @@ def rotate_left_kernel(
     pid = tl.program_id(axis=0)
     block_start = pid * BLOCK_SIZE
     offsets = block_start + tl.arange(0, BLOCK_SIZE)
-    boards = tl.load(boards_ptr + offsets, mask=offsets < n_elements)
+    boards = tl.load(boards_ptr + offsets, mask=offsets < n_elements).expand_dims(1)
+    lut_offsets = tl.arange(0, 65536)
+    move_lut = tl.load(move_lut_ptr + lut_offsets)
+    move_rewards = tl.load(move_rewards_ptr + lut_offsets)
+    move_left_boards, move_left_rewards = move_left(
+        boards, move_lut, move_rewards, BLOCK_SIZE
+    )
+    boards_r = flip_horizontal(boards)
+    move_right_boards, move_right_rewards = move_left(
+        boards_r, move_lut, move_rewards, BLOCK_SIZE
+    )
+    boards_u = transpose(boards)
+    move_up_boards, move_up_rewards = move_left(
+        boards_u, move_lut, move_rewards, BLOCK_SIZE
+    )
+    boards_d = transpose(boards_r)
+    move_down_boards, move_down_rewards = move_left(
+        boards_d, move_lut, move_rewards, BLOCK_SIZE
+    )
+    output_offsets = block_start + tl.arange(0, BLOCK_SIZE)
+    tl.store(
+        output_ptr + output_offsets, move_left_boards, mask=output_offsets < n_elements
+    )
+    tl.store(
+        output_ptr + output_offsets, move_right_boards, mask=output_offsets < n_elements
+    )
+    tl.store(
+        output_ptr + output_offsets, move_up_boards, mask=output_offsets < n_elements
+    )
+    tl.store(
+        output_ptr + output_offsets, move_down_boards, mask=output_offsets < n_elements
+    )
+
+
+def do_all_moves(
+    boards: torch.Tensor, move_lut: torch.Tensor, move_rewards: torch.Tensor
+) -> torch.Tensor:
+    output = torch.empty(boards.shape[0], 4, device=DEVICE, dtype=torch.uint64)
+    do_all_moves_kernel[1, 1](
+        boards, move_lut, move_rewards, output, boards.shape[0], BLOCK_SIZE=1024
+    )
+    return output
 
 
 @triton.jit
@@ -203,8 +238,6 @@ def generate_transition_tables(device: torch.device) -> tuple[torch.Tensor, ...]
 
 boards = torch.zeros(10, 16, device=DEVICE, dtype=torch.uint64)
 
-board_reprs = board_to_repr(boards)
-insert_random_tile(board_reprs)
-insert_random_tile(board_reprs)
-tmp = repr_to_board(board_reprs)
-print(tmp)
+move_lut, move_rewards = generate_transition_tables(DEVICE)
+all_moves = do_all_moves(boards, move_lut, move_rewards)
+print(all_moves)
