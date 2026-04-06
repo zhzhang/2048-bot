@@ -148,6 +148,7 @@ def ntuple_mask_8(board):
 @triton.jit
 def get_all_ntuples(
     boards,
+    BLOCK_SIZE: tl.constexpr,
 ):
     boards_t = transpose(boards)
     boards_h = flip_horizontal(boards)
@@ -156,33 +157,30 @@ def get_all_ntuples(
     boards_vt = transpose(boards_v)
     boards_hv = flip_horizontal(boards_v)
     boards_hvt = transpose(boards_hv)
+    boards1 = tl.join(boards, boards_t)
+    boards2 = tl.join(boards_h, boards_ht)
+    boards3 = tl.join(boards_v, boards_vt)
+    boards4 = tl.join(boards_hv, boards_hvt)
+    boards5 = tl.join(boards1, boards2)
+    boards6 = tl.join(boards3, boards4)
+    all_board_views = tl.join(boards5, boards6).reshape(BLOCK_SIZE, 4, 8)
 
-    nt_1 = ntuple_mask_1(boards)
-    nt_1_t = ntuple_mask_1(boards_t)
-    nt_1_h = ntuple_mask_1(boards_h)
-    nt_1_ht = ntuple_mask_1(boards_ht)
-    nt_1_v = ntuple_mask_1(boards_v)
-    nt_1_vt = ntuple_mask_1(boards_vt)
-    nt_1_hv = ntuple_mask_1(boards_hv)
-    nt_1_hvt = ntuple_mask_1(boards_hvt)
-
-    nt_2 = ntuple_mask_2(boards)
-    nt_2_t = ntuple_mask_2(boards_t)
-    nt_2_h = ntuple_mask_2(boards_h)
-    nt_2_ht = ntuple_mask_2(boards_ht)
-    nt_2_v = ntuple_mask_2(boards_v)
-    nt_2_vt = ntuple_mask_2(boards_vt)
-    nt_2_hv = ntuple_mask_2(boards_hv)
-    nt_2_hvt = ntuple_mask_2(boards_hvt)
-
-    nt_3 = ntuple_mask_3(boards)
-    nt_3_t = ntuple_mask_3(boards_t)
-    nt_3_h = ntuple_mask_3(boards_h)
-    nt_3_ht = ntuple_mask_3(boards_ht)
-    nt_3_v = ntuple_mask_3(boards_v)
-    nt_3_vt = ntuple_mask_3(boards_vt)
-    nt_3_hv = ntuple_mask_3(boards_hv)
-    nt_3_hvt = ntuple_mask_3(boards_hvt)
+    nt_1 = ntuple_mask_1(all_board_views)
+    nt_2 = ntuple_mask_2(all_board_views)
+    nt_3 = ntuple_mask_3(all_board_views)
+    nt_4 = ntuple_mask_4(all_board_views)
+    nt_5 = ntuple_mask_5(all_board_views)
+    nt_6 = ntuple_mask_6(all_board_views)
+    nt_7 = ntuple_mask_7(all_board_views)
+    nt_8 = ntuple_mask_8(all_board_views)
+    nt_p1 = tl.join(nt_1, nt_2)
+    nt_p2 = tl.join(nt_3, nt_4)
+    nt_p3 = tl.join(nt_5, nt_6)
+    nt_p4 = tl.join(nt_7, nt_8)
+    nt_p5 = tl.join(nt_p1, nt_p2)
+    nt_p6 = tl.join(nt_p3, nt_p4)
+    all_ntuples = tl.join(nt_p5, nt_p6).reshape(BLOCK_SIZE, 4, 8, 8)
+    return all_ntuples
 
 
 @triton.jit
@@ -193,9 +191,9 @@ def move_left(
     BLOCK_SIZE: tl.constexpr,
 ):
     shifts = 48 - (tl.arange(0, 4) * 16)
-    rows = ((boards >> shifts) & 0xFFFF).ravel()
+    rows = ((boards.expand_dims(1) >> shifts) & 0xFFFF).ravel()
     new_rows = tl.gather(move_lut, rows, axis=0).to(tl.uint64).reshape(BLOCK_SIZE, 4)
-    rewards = tl.gather(move_rewards, rows, axis=0)
+    rewards = tl.gather(move_rewards, rows, axis=0).reshape(BLOCK_SIZE, 4).sum(1)
     new_boards = tl.sum(new_rows << shifts, 1)
     return new_boards, rewards
 
@@ -207,7 +205,6 @@ def do_all_moves(
     move_rewards,
     BLOCK_SIZE: tl.constexpr,
 ):
-
     move_left_boards, move_left_rewards = move_left(
         boards, move_lut, move_rewards, BLOCK_SIZE
     )
@@ -251,7 +248,7 @@ def do_all_moves_kernel(
     pid = tl.program_id(axis=0)
     block_start = pid * BLOCK_SIZE
     offsets = block_start + tl.arange(0, BLOCK_SIZE)
-    boards = tl.load(boards_ptr + offsets, mask=offsets < n_elements).expand_dims(1)
+    boards = tl.load(boards_ptr + offsets, mask=offsets < n_elements)
     lut_offsets = tl.arange(0, 32768)  # MOVE_LUT_SIZE
     move_lut = tl.load(move_lut_ptr + lut_offsets)
     move_rewards = tl.load(move_rewards_ptr + lut_offsets)
@@ -268,7 +265,7 @@ def do_all_moves_wrapper(
     boards: torch.Tensor, move_lut: torch.Tensor, move_rewards: torch.Tensor
 ) -> torch.Tensor:
     output = torch.empty((boards.shape[0], 4), device=DEVICE, dtype=torch.uint64)
-    do_all_moves_wrapper[1, 1](
+    do_all_moves_kernel[1, 1](
         boards, move_lut, move_rewards, output, boards.shape[0], BLOCK_SIZE=1024
     )
     return output
@@ -279,7 +276,7 @@ def train_epoch_kernel(
     boards_ptr,
     move_lut_ptr,
     move_rewards_ptr,
-    ntuples_ptr,
+    ntuple_values_ptr,
     output_ptr,
     n_elements,
     BLOCK_SIZE: tl.constexpr,
@@ -291,13 +288,20 @@ def train_epoch_kernel(
     boards = tl.load(boards_ptr + offsets, mask=active)
     move_lut = tl.load(move_lut_ptr + offsets)
     move_rewards = tl.load(move_rewards_ptr + offsets)
-    output_offsets = offsets * FEATURES_PER_BOARD
-    for i in range(FEATURES_PER_BOARD):
+    # output_offsets = offsets * FEATURES_PER_BOARD
+    total_scores = tl.zeros((BLOCK_SIZE,), dtype=tl.float32)
+    for i in range(10):
         (
             all_boards,
             all_rewards,
-        ) = do_all_moves_kernel(boards, move_lut, move_rewards, BLOCK_SIZE)
+        ) = do_all_moves(boards, move_lut, move_rewards, BLOCK_SIZE)
         valid_move = all_boards != boards.expand_dims(1)
+        ntuples = get_all_ntuples(all_boards, BLOCK_SIZE)
+        ntuple_values = tl.load(ntuple_values_ptr + offsets + i)
+        afterstate_values = ntuple_values[ntuples] + all_rewards
+        best_move_idx = afterstate_values.argmax(1)
+        boards = tl.gather(all_boards, best_move_idx, axis=1)
+        # Update ntuple values
     # Output layout is [mask_0_sym_0..7, mask_1_sym_0..7, ..., mask_7_sym_0..7].
 
 
@@ -438,5 +442,14 @@ print("-" * 100)
 
 move_lut, move_rewards = generate_transition_tables(DEVICE)
 ntuple_values = torch.zeros((8, NUM_NTUPLE_VALUES), device=DEVICE, dtype=torch.float32)
-all_moves = do_all_moves(boards, move_lut, move_rewards)
-print_boards(repr_to_board(all_moves[1, :]))
+# all_moves = do_all_moves_wrapper(boards, move_lut, move_rewards)
+# print_boards(repr_to_board(all_moves[1, :]))
+train_epoch_kernel[1, 1](
+    boards,
+    move_lut,
+    move_rewards,
+    ntuple_values,
+    boards,
+    boards.shape[0],
+    BLOCK_SIZE=1024,
+)
