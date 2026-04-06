@@ -191,7 +191,7 @@ def move_left(
     BLOCK_SIZE: tl.constexpr,
 ):
     shifts = 48 - (tl.arange(0, 4) * 16)
-    rows = ((boards.expand_dims(1) >> shifts) & 0xFFFF).ravel()
+    rows = ((boards >> shifts) & 0xFFFF).ravel()
     new_rows = tl.gather(move_lut, rows, axis=0).to(tl.uint64).reshape(BLOCK_SIZE, 4)
     rewards = tl.gather(move_rewards, rows, axis=0).reshape(BLOCK_SIZE, 4).sum(1)
     new_boards = tl.sum(new_rows << shifts, 1)
@@ -248,7 +248,7 @@ def do_all_moves_kernel(
     pid = tl.program_id(axis=0)
     block_start = pid * BLOCK_SIZE
     offsets = block_start + tl.arange(0, BLOCK_SIZE)
-    boards = tl.load(boards_ptr + offsets, mask=offsets < n_elements)
+    boards = tl.load(boards_ptr + offsets, mask=offsets < n_elements).expand_dims(1)
     lut_offsets = tl.arange(0, 32768)  # MOVE_LUT_SIZE
     move_lut = tl.load(move_lut_ptr + lut_offsets)
     move_rewards = tl.load(move_rewards_ptr + lut_offsets)
@@ -285,7 +285,7 @@ def train_epoch_kernel(
     block_start = pid * BLOCK_SIZE
     offsets = block_start + tl.arange(0, BLOCK_SIZE)
     active = offsets < n_elements
-    boards = tl.load(boards_ptr + offsets, mask=active)
+    boards = tl.load(boards_ptr + offsets, mask=active).expand_dims(1)
     move_lut = tl.load(move_lut_ptr + offsets)
     move_rewards = tl.load(move_rewards_ptr + offsets)
     # output_offsets = offsets * FEATURES_PER_BOARD
@@ -295,11 +295,13 @@ def train_epoch_kernel(
             all_boards,
             all_rewards,
         ) = do_all_moves(boards, move_lut, move_rewards, BLOCK_SIZE)
-        valid_move = all_boards != boards.expand_dims(1)
+        valid_move = all_boards != boards
         ntuples = get_all_ntuples(all_boards, BLOCK_SIZE)
-        ntuple_values = tl.load(ntuple_values_ptr + offsets + i)
-        afterstate_values = ntuple_values[ntuples] + all_rewards
-        best_move_idx = afterstate_values.argmax(1)
+        # [batch, move, board_view, ntuple]
+        ntuple_values = (tl.load(ntuple_values_ptr + ntuples) / 8).sum(2)
+        # [batch, move, ntuple]
+        afterstate_values = (ntuple_values / 8).sum(2) + all_rewards
+        best_move_idx = afterstate_values.argmax(1).expand_dims(1)
         boards = tl.gather(all_boards, best_move_idx, axis=1)
         # Update ntuple values
     # Output layout is [mask_0_sym_0..7, mask_1_sym_0..7, ..., mask_7_sym_0..7].
@@ -441,7 +443,9 @@ print_boards(repr_to_board(boards))
 print("-" * 100)
 
 move_lut, move_rewards = generate_transition_tables(DEVICE)
-ntuple_values = torch.zeros((8, NUM_NTUPLE_VALUES), device=DEVICE, dtype=torch.float32)
+ntuple_values = torch.full(
+    (8, NUM_NTUPLE_VALUES), 64, device=DEVICE, dtype=torch.float32
+)
 # all_moves = do_all_moves_wrapper(boards, move_lut, move_rewards)
 # print_boards(repr_to_board(all_moves[1, :]))
 train_epoch_kernel[1, 1](
