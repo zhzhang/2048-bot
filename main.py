@@ -12,17 +12,12 @@ NUM_NTUPLE_VALUES = 16777216
 
 
 @triton.jit
-def insert_random_tile_kernel(
-    boards_ptr,
-    n_elements,
+def insert_random_tile(
+    boards,
     seed,
     BLOCK_SIZE: tl.constexpr,
 ):
-    pid = tl.program_id(axis=0)
-    block_start = pid * BLOCK_SIZE
-    offsets = block_start + tl.arange(0, BLOCK_SIZE)
-    # Unpack boards into a 2D array of shape (BLOCK_SIZE, 16)
-    boards = tl.load(boards_ptr + offsets, mask=offsets < n_elements).expand_dims(1)
+    offsets = tl.arange(0, BLOCK_SIZE)
     shifts = 60 - tl.arange(0, 16) * 4
     x = (boards >> shifts) & 0xF
     zeros = (x == 0).to(tl.uint64)
@@ -37,10 +32,26 @@ def insert_random_tile_kernel(
     vals = vals << (60 - 4 * idx)
     boards = boards.ravel()
     boards = boards | vals
+    return boards
+
+
+@triton.jit
+def insert_random_tile_kernel(
+    boards_ptr,
+    n_elements,
+    seed,
+    BLOCK_SIZE: tl.constexpr,
+):
+    pid = tl.program_id(axis=0)
+    block_start = pid * BLOCK_SIZE
+    offsets = block_start + tl.arange(0, BLOCK_SIZE)
+    # Unpack boards into a 2D array of shape (BLOCK_SIZE, 16)
+    boards = tl.load(boards_ptr + offsets, mask=offsets < n_elements).expand_dims(1)
+    boards = insert_random_tile(boards, seed, BLOCK_SIZE)
     tl.store(boards_ptr + offsets, boards, mask=offsets < n_elements)
 
 
-def insert_random_tile(boards: torch.Tensor) -> torch.Tensor:
+def insert_random_tile_wrapper(boards: torch.Tensor) -> torch.Tensor:
     insert_random_tile_kernel[1, 1](
         boards, boards.shape[0], int(time.time() * 1000), BLOCK_SIZE=1024
     )
@@ -223,12 +234,12 @@ def do_all_moves(
         boards_d, move_lut, move_rewards, BLOCK_SIZE
     )
     move_down_boards = transpose(flip_horizontal(move_down_boards))
-    lr_boards = tl.join(move_left_boards, move_right_boards)
-    ud_boards = tl.join(move_up_boards, move_down_boards)
-    all_boards = tl.join(lr_boards, ud_boards).reshape(BLOCK_SIZE, 4)
-    lr_rewards = tl.join(move_left_rewards, move_right_rewards)
-    ud_rewards = tl.join(move_up_rewards, move_down_rewards)
-    all_rewards = tl.join(lr_rewards, ud_rewards).reshape(BLOCK_SIZE, 4)
+    lu_boards = tl.join(move_left_boards, move_up_boards)
+    rd_boards = tl.join(move_right_boards, move_down_boards)
+    all_boards = tl.join(lu_boards, rd_boards).reshape(BLOCK_SIZE, 4)
+    lu_rewards = tl.join(move_left_rewards, move_up_rewards)
+    rd_rewards = tl.join(move_right_rewards, move_down_rewards)
+    all_rewards = tl.join(lu_rewards, rd_rewards).reshape(BLOCK_SIZE, 4)
 
     return (
         all_boards,
@@ -289,22 +300,28 @@ def train_epoch_kernel(
     move_lut = tl.load(move_lut_ptr + offsets)
     move_rewards = tl.load(move_rewards_ptr + offsets)
     # output_offsets = offsets * FEATURES_PER_BOARD
-    total_scores = tl.zeros((BLOCK_SIZE,), dtype=tl.float32)
-    for i in range(10):
-        (
-            all_boards,
-            all_rewards,
-        ) = do_all_moves(boards, move_lut, move_rewards, BLOCK_SIZE)
-        valid_move = all_boards != boards
-        ntuples = get_all_ntuples(all_boards, BLOCK_SIZE)
-        # [batch, move, board_view, ntuple]
-        ntuple_values = (tl.load(ntuple_values_ptr + ntuples) / 8).sum(2)
-        # [batch, move, ntuple]
-        afterstate_values = (ntuple_values / 8).sum(2) + all_rewards
-        best_move_idx = afterstate_values.argmax(1).expand_dims(1)
-        boards = tl.gather(all_boards, best_move_idx, axis=1)
-        # Update ntuple values
-    # Output layout is [mask_0_sym_0..7, mask_1_sym_0..7, ..., mask_7_sym_0..7].
+    total_scores = tl.zeros((BLOCK_SIZE, 1), dtype=tl.float32)
+    (
+        all_boards,
+        all_rewards,
+    ) = do_all_moves(boards, move_lut, move_rewards, BLOCK_SIZE)
+    valid_move = all_boards != boards
+    ntuples = get_all_ntuples(all_boards, BLOCK_SIZE)
+    # [batch, move, board_view, ntuple]
+    # ntuple_values = (tl.load(ntuple_values_ptr + ntuples) / 8).sum(2)
+    # [batch, move, ntuple]
+    # afterstate_values = (ntuple_values / 8).sum(2) + all_rewards
+    # new_ntuple_targets = tl.where(valid_move, afterstate_values, total_scores)
+    # best_move_idx = afterstate_values.argmax(1).expand_dims(1)
+    # best_move_reward = tl.gather(all_rewards, best_move_idx, axis=1)
+    # boards = tl.gather(all_boards, best_move_idx, axis=1)
+    # total_scores = total_scores + best_move_reward
+    # insert_random_tile(boards, i, BLOCK_SIZE)
+    # Update ntuple values
+    tl.store(
+        output_ptr + tl.arange(0, BLOCK_SIZE)[:, None] * 4 + tl.arange(0, 4)[None, :],
+        all_boards.to(tl.uint64),
+    )
 
 
 @triton.jit
@@ -435,9 +452,9 @@ def generate_transition_tables(device: torch.device) -> tuple[torch.Tensor, ...]
     )
 
 
-boards = torch.zeros(3, device=DEVICE, dtype=torch.uint64)
-insert_random_tile(boards)
-insert_random_tile(boards)
+boards = torch.zeros(1, device=DEVICE, dtype=torch.uint64)
+insert_random_tile_wrapper(boards)
+insert_random_tile_wrapper(boards)
 
 print_boards(repr_to_board(boards))
 print("-" * 100)
@@ -448,12 +465,14 @@ ntuple_values = torch.full(
 )
 # all_moves = do_all_moves_wrapper(boards, move_lut, move_rewards)
 # print_boards(repr_to_board(all_moves[1, :]))
+output = torch.empty((boards.shape[0], 4), device=DEVICE, dtype=torch.int64)
 train_epoch_kernel[1, 1](
     boards,
     move_lut,
     move_rewards,
     ntuple_values,
-    boards,
+    output,
     boards.shape[0],
     BLOCK_SIZE=1024,
 )
+print_boards(repr_to_board(output.flatten()))
