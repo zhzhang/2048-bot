@@ -297,8 +297,9 @@ def train_epoch_kernel(
     offsets = block_start + tl.arange(0, BLOCK_SIZE)
     active = offsets < n_elements
     boards = tl.load(boards_ptr + offsets, mask=active).expand_dims(1)
-    move_lut = tl.load(move_lut_ptr + offsets)
-    move_rewards = tl.load(move_rewards_ptr + offsets)
+    lut_offsets = tl.arange(0, 32768)  # MOVE_LUT_SIZE
+    move_lut = tl.load(move_lut_ptr + lut_offsets)
+    move_rewards = tl.load(move_rewards_ptr + lut_offsets)
     # output_offsets = offsets * FEATURES_PER_BOARD
     total_scores = tl.zeros((BLOCK_SIZE, 1), dtype=tl.float32)
     (
@@ -308,7 +309,7 @@ def train_epoch_kernel(
     valid_move = all_boards != boards
     ntuples = get_all_ntuples(all_boards, BLOCK_SIZE)
     # [batch, move, board_view, ntuple]
-    # ntuple_values = (tl.load(ntuple_values_ptr + ntuples) / 8).sum(2)
+    ntuple_values = (tl.load(ntuple_values_ptr + ntuples) / 8).sum(2)
     # [batch, move, ntuple]
     # afterstate_values = (ntuple_values / 8).sum(2) + all_rewards
     # new_ntuple_targets = tl.where(valid_move, afterstate_values, total_scores)
@@ -320,7 +321,7 @@ def train_epoch_kernel(
     # Update ntuple values
     tl.store(
         output_ptr + tl.arange(0, BLOCK_SIZE)[:, None] * 4 + tl.arange(0, 4)[None, :],
-        all_boards.to(tl.uint64),
+        all_rewards.to(tl.uint64),
     )
 
 
@@ -431,7 +432,7 @@ def generate_transition_tables(device: torch.device) -> tuple[torch.Tensor, ...]
             current = compact[cursor]
             if cursor + 1 < len(compact) and compact[cursor + 1] == current:
                 current += 1
-                reward += 1
+                reward += current
                 cursor += 2
             else:
                 cursor += 1
@@ -452,9 +453,9 @@ def generate_transition_tables(device: torch.device) -> tuple[torch.Tensor, ...]
     )
 
 
-boards = torch.zeros(1, device=DEVICE, dtype=torch.uint64)
-insert_random_tile_wrapper(boards)
-insert_random_tile_wrapper(boards)
+boards = board_to_repr(torch.tensor([[[1, 1, 0, 0], [0, 0, 0, 0], [0, 0, 0, 2], [0, 0, 0, 2]]], device=DEVICE, dtype=torch.uint64))
+# insert_random_tile_wrapper(boards)
+# insert_random_tile_wrapper(boards)
 
 print_boards(repr_to_board(boards))
 print("-" * 100)
@@ -464,7 +465,7 @@ ntuple_values = torch.full(
     (8, NUM_NTUPLE_VALUES), 64, device=DEVICE, dtype=torch.float32
 )
 # all_moves = do_all_moves_wrapper(boards, move_lut, move_rewards)
-# print_boards(repr_to_board(all_moves[1, :]))
+# print_boards(repr_to_board(all_moves[0, :]))
 output = torch.empty((boards.shape[0], 4), device=DEVICE, dtype=torch.int64)
 train_epoch_kernel[1, 1](
     boards,
@@ -475,4 +476,4 @@ train_epoch_kernel[1, 1](
     boards.shape[0],
     BLOCK_SIZE=1024,
 )
-print_boards(repr_to_board(output.flatten()))
+print(output)
