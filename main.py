@@ -159,7 +159,7 @@ def ntuple_mask_8(board):
 @triton.jit
 def get_all_ntuples(
     boards,
-    BLOCK_SIZE: tl.constexpr,
+    n_boards,
 ):
     boards_t = transpose(boards)
     boards_h = flip_horizontal(boards)
@@ -174,7 +174,7 @@ def get_all_ntuples(
     boards4 = tl.join(boards_hv, boards_hvt)
     boards5 = tl.join(boards1, boards2)
     boards6 = tl.join(boards3, boards4)
-    all_board_views = tl.join(boards5, boards6).reshape(BLOCK_SIZE, 4, 8)
+    all_board_views = tl.join(boards5, boards6).reshape(n_boards, 8)
 
     nt_1 = ntuple_mask_1(all_board_views)
     nt_2 = ntuple_mask_2(all_board_views)
@@ -190,7 +190,7 @@ def get_all_ntuples(
     nt_p4 = tl.join(nt_7, nt_8)
     nt_p5 = tl.join(nt_p1, nt_p2)
     nt_p6 = tl.join(nt_p3, nt_p4)
-    all_ntuples = tl.join(nt_p5, nt_p6).reshape(BLOCK_SIZE, 4, 8, 8)
+    all_ntuples = tl.join(nt_p5, nt_p6).reshape(n_boards, 8, 8)
     return all_ntuples
 
 
@@ -283,6 +283,12 @@ def do_all_moves_wrapper(
 
 
 @triton.jit
+def any_helper(
+    a, b
+):
+    return a | b
+
+@triton.jit
 def train_epoch_kernel(
     boards_ptr,
     move_lut_ptr,
@@ -300,28 +306,48 @@ def train_epoch_kernel(
     lut_offsets = tl.arange(0, 32768)  # MOVE_LUT_SIZE
     move_lut = tl.load(move_lut_ptr + lut_offsets)
     move_rewards = tl.load(move_rewards_ptr + lut_offsets)
-    # output_offsets = offsets * FEATURES_PER_BOARD
-    total_scores = tl.zeros((BLOCK_SIZE, 1), dtype=tl.float32)
-    (
-        all_boards,
-        all_rewards,
-    ) = do_all_moves(boards, move_lut, move_rewards, BLOCK_SIZE)
-    valid_move = all_boards != boards
-    ntuples = get_all_ntuples(all_boards, BLOCK_SIZE)
-    # [batch, move, board_view, ntuple]
-    ntuple_values = (tl.load(ntuple_values_ptr + ntuples) / 8).sum(2)
-    # [batch, move, ntuple]
-    # afterstate_values = (ntuple_values / 8).sum(2) + all_rewards
-    # new_ntuple_targets = tl.where(valid_move, afterstate_values, total_scores)
-    # best_move_idx = afterstate_values.argmax(1).expand_dims(1)
-    # best_move_reward = tl.gather(all_rewards, best_move_idx, axis=1)
-    # boards = tl.gather(all_boards, best_move_idx, axis=1)
-    # total_scores = total_scores + best_move_reward
-    # insert_random_tile(boards, i, BLOCK_SIZE)
-    # Update ntuple values
+    zero_scores = tl.zeros((BLOCK_SIZE, 1), dtype=tl.uint32)
+    zero_afterstate_values = tl.zeros((BLOCK_SIZE, 4), dtype=tl.float32)
+    current_scores = tl.zeros((BLOCK_SIZE, 1), dtype=tl.uint32)
+    current_ntuples = get_all_ntuples(boards, BLOCK_SIZE)
+    ntuple_trash_idx = tl.full((BLOCK_SIZE, 8, 8), 16777216, tl.uint32) # NUM_NTUPLE_VALUES
+    ntuple_offsets = 16777216 * tl.arange(0, 8)[None, None, None, :]
+    for i in tl.range(8):
+        (
+            all_boards,
+            all_rewards,
+        ) = do_all_moves(boards, move_lut, move_rewards, BLOCK_SIZE)
+        valid_move = all_boards != boards
+        any_valid = valid_move.reduce(1, any_helper, keep_dims=True)
+        candidate_move_ntuples = get_all_ntuples(all_boards, BLOCK_SIZE * 4).reshape(BLOCK_SIZE, 4, 8, 8)
+        # [batch, move, board_view, ntuple]
+        candidate_move_ntuple_values = (tl.load(ntuple_values_ptr + candidate_move_ntuples + ntuple_offsets) / 8).sum(2)
+        # [batch, move, ntuple]
+        candidate_move_afterstate_values = (candidate_move_ntuple_values / 8).sum(2) + all_rewards
+        # Set the afterstate values to zero if the move was invalid, to prevent argmax from choosing an invalid move.
+        candidate_move_afterstate_values = tl.where(valid_move, candidate_move_afterstate_values, zero_afterstate_values)
+        best_move_idx = candidate_move_afterstate_values.argmax(1).expand_dims(1)
+        afterstate_values = tl.gather(candidate_move_afterstate_values, best_move_idx, axis=1)
+        afterstate_values = tl.where(any_valid, afterstate_values, current_scores)
+        # Only write the ntuple values if the particular game didn't end in the last move and get reset.
+        ntuple_store_idx = tl.where(any_valid.expand_dims(1), current_ntuples, ntuple_trash_idx)
+        tl.store(ntuple_values_ptr + ntuple_store_idx + ntuple_offsets.reshape(1, 1, 8), afterstate_values.expand_dims(1))
+        boards = tl.gather(all_boards, best_move_idx, axis=1)
+
+        # Prepare the next training step.
+        # New scores are the current scores plus the reward of the best move.
+        best_move_reward = tl.gather(all_rewards, best_move_idx, axis=1)
+        current_scores = current_scores + best_move_reward
+        # Reset the board if no valid move was made
+        new_games = tl.zeros((BLOCK_SIZE, 1), dtype=tl.uint64)
+        insert_random_tile(new_games, i, BLOCK_SIZE)
+        insert_random_tile(new_games, i, BLOCK_SIZE)
+        insert_random_tile(boards, i, BLOCK_SIZE)
+        boards = tl.where(any_valid, new_games, boards)
+        current_scores = tl.where(any_valid, current_scores, zero_scores)
     tl.store(
-        output_ptr + tl.arange(0, BLOCK_SIZE)[:, None] * 4 + tl.arange(0, 4)[None, :],
-        all_rewards.to(tl.uint64),
+        output_ptr + tl.arange(0, BLOCK_SIZE),
+        current_scores.ravel(),
     )
 
 
@@ -466,7 +492,7 @@ ntuple_values = torch.full(
 )
 # all_moves = do_all_moves_wrapper(boards, move_lut, move_rewards)
 # print_boards(repr_to_board(all_moves[0, :]))
-output = torch.empty((boards.shape[0], 4), device=DEVICE, dtype=torch.int64)
+output = torch.empty((boards.shape[0], 1), device=DEVICE, dtype=torch.int64)
 train_epoch_kernel[1, 1](
     boards,
     move_lut,
