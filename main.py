@@ -294,7 +294,6 @@ def train_epoch_kernel(
     move_lut_ptr,
     move_rewards_ptr,
     ntuple_values_ptr,
-    output_ptr,
     n_elements,
     BLOCK_SIZE: tl.constexpr,
 ):
@@ -310,9 +309,8 @@ def train_epoch_kernel(
     zero_afterstate_values = tl.zeros((BLOCK_SIZE, 4), dtype=tl.float32)
     current_scores = tl.zeros((BLOCK_SIZE, 1), dtype=tl.uint32)
     current_ntuples = get_all_ntuples(boards, BLOCK_SIZE)
-    ntuple_trash_idx = tl.full((BLOCK_SIZE, 8, 8), 16777216, tl.uint32) # NUM_NTUPLE_VALUES
     ntuple_offsets = 16777216 * tl.arange(0, 8)[None, None, None, :]
-    for i in tl.range(8):
+    for i in tl.range(1, loop_unroll_factor=1):
         (
             all_boards,
             all_rewards,
@@ -321,7 +319,9 @@ def train_epoch_kernel(
         any_valid = valid_move.reduce(1, any_helper, keep_dims=True)
         candidate_move_ntuples = get_all_ntuples(all_boards, BLOCK_SIZE * 4).reshape(BLOCK_SIZE, 4, 8, 8)
         # [batch, move, board_view, ntuple]
-        candidate_move_ntuple_values = (tl.load(ntuple_values_ptr + candidate_move_ntuples + ntuple_offsets) / 8).sum(2)
+        candidate_move_ntuple_values = (
+            tl.load(ntuple_values_ptr + candidate_move_ntuples + ntuple_offsets) / 8
+        ).sum(2)
         # [batch, move, ntuple]
         candidate_move_afterstate_values = (candidate_move_ntuple_values / 8).sum(2) + all_rewards
         # Set the afterstate values to zero if the move was invalid, to prevent argmax from choosing an invalid move.
@@ -330,8 +330,11 @@ def train_epoch_kernel(
         afterstate_values = tl.gather(candidate_move_afterstate_values, best_move_idx, axis=1)
         afterstate_values = tl.where(any_valid, afterstate_values, current_scores)
         # Only write the ntuple values if the particular game didn't end in the last move and get reset.
-        ntuple_store_idx = tl.where(any_valid.expand_dims(1), current_ntuples, ntuple_trash_idx)
-        tl.store(ntuple_values_ptr + ntuple_store_idx + ntuple_offsets.reshape(1, 1, 8), afterstate_values.expand_dims(1))
+        tl.store(
+            ntuple_values_ptr + current_ntuples + ntuple_offsets.reshape(1, 1, 8),
+            afterstate_values.expand_dims(1),
+            mask=any_valid.expand_dims(1),
+        )
         boards = tl.gather(all_boards, best_move_idx, axis=1)
 
         # Prepare the next training step.
@@ -345,10 +348,11 @@ def train_epoch_kernel(
         insert_random_tile(boards, i, BLOCK_SIZE)
         boards = tl.where(any_valid, new_games, boards)
         current_scores = tl.where(any_valid, current_scores, zero_scores)
-    tl.store(
-        output_ptr + tl.arange(0, BLOCK_SIZE),
-        current_scores.ravel(),
-    )
+    # tl.store(
+    #     output_ptr + tl.arange(0, BLOCK_SIZE),
+    #     boards.ravel(),
+    #     mask=offsets < n_elements,
+    # )
 
 
 @triton.jit
@@ -492,13 +496,13 @@ ntuple_values = torch.full(
 )
 # all_moves = do_all_moves_wrapper(boards, move_lut, move_rewards)
 # print_boards(repr_to_board(all_moves[0, :]))
-output = torch.empty((boards.shape[0], 1), device=DEVICE, dtype=torch.int64)
+output = torch.ones((boards.shape[0], 1), device=DEVICE, dtype=torch.int64)
+print(output)
 train_epoch_kernel[1, 1](
     boards,
     move_lut,
     move_rewards,
     ntuple_values,
-    output,
     boards.shape[0],
     BLOCK_SIZE=1024,
 )
