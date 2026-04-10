@@ -283,10 +283,9 @@ def do_all_moves_wrapper(
 
 
 @triton.jit
-def any_helper(
-    a, b
-):
+def any_helper(a, b):
     return a | b
+
 
 @triton.jit
 def train_epoch_kernel(
@@ -294,6 +293,7 @@ def train_epoch_kernel(
     move_lut_ptr,
     move_rewards_ptr,
     ntuple_values_ptr,
+    output_ptr,
     n_elements,
     BLOCK_SIZE: tl.constexpr,
 ):
@@ -310,24 +310,33 @@ def train_epoch_kernel(
     current_scores = tl.zeros((BLOCK_SIZE, 1), dtype=tl.uint32)
     current_ntuples = get_all_ntuples(boards, BLOCK_SIZE)
     ntuple_offsets = 16777216 * tl.arange(0, 8)[None, None, None, :]
-    for i in tl.range(1, loop_unroll_factor=1):
+
+    for i in tl.range(1000, loop_unroll_factor=0):
         (
             all_boards,
             all_rewards,
         ) = do_all_moves(boards, move_lut, move_rewards, BLOCK_SIZE)
         valid_move = all_boards != boards
         any_valid = valid_move.reduce(1, any_helper, keep_dims=True)
-        candidate_move_ntuples = get_all_ntuples(all_boards, BLOCK_SIZE * 4).reshape(BLOCK_SIZE, 4, 8, 8)
+        candidate_move_ntuples = get_all_ntuples(all_boards, BLOCK_SIZE * 4).reshape(
+            BLOCK_SIZE, 4, 8, 8
+        )
         # [batch, move, board_view, ntuple]
         candidate_move_ntuple_values = (
             tl.load(ntuple_values_ptr + candidate_move_ntuples + ntuple_offsets) / 8
         ).sum(2)
         # [batch, move, ntuple]
-        candidate_move_afterstate_values = (candidate_move_ntuple_values / 8).sum(2) + all_rewards
+        candidate_move_afterstate_values = (candidate_move_ntuple_values / 8).sum(
+            2
+        ) + all_rewards
         # Set the afterstate values to zero if the move was invalid, to prevent argmax from choosing an invalid move.
-        candidate_move_afterstate_values = tl.where(valid_move, candidate_move_afterstate_values, zero_afterstate_values)
+        candidate_move_afterstate_values = tl.where(
+            valid_move, candidate_move_afterstate_values, zero_afterstate_values
+        )
         best_move_idx = candidate_move_afterstate_values.argmax(1).expand_dims(1)
-        afterstate_values = tl.gather(candidate_move_afterstate_values, best_move_idx, axis=1)
+        afterstate_values = tl.gather(
+            candidate_move_afterstate_values, best_move_idx, axis=1
+        )
         afterstate_values = tl.where(any_valid, afterstate_values, current_scores)
         # Only write the ntuple values if the particular game didn't end in the last move and get reset.
         tl.store(
@@ -346,13 +355,12 @@ def train_epoch_kernel(
         insert_random_tile(new_games, i, BLOCK_SIZE)
         insert_random_tile(new_games, i, BLOCK_SIZE)
         insert_random_tile(boards, i, BLOCK_SIZE)
-        boards = tl.where(any_valid, new_games, boards)
-        current_scores = tl.where(any_valid, current_scores, zero_scores)
-    # tl.store(
-    #     output_ptr + tl.arange(0, BLOCK_SIZE),
-    #     boards.ravel(),
-    #     mask=offsets < n_elements,
-    # )
+        boards = tl.where(any_valid, boards, new_games)
+    tl.store(
+        output_ptr + tl.arange(0, BLOCK_SIZE),
+        boards.ravel(),
+        mask=offsets < n_elements,
+    )
 
 
 @triton.jit
@@ -483,9 +491,16 @@ def generate_transition_tables(device: torch.device) -> tuple[torch.Tensor, ...]
     )
 
 
-boards = board_to_repr(torch.tensor([[[1, 1, 0, 0], [0, 0, 0, 0], [0, 0, 0, 2], [0, 0, 0, 2]]], device=DEVICE, dtype=torch.uint64))
-# insert_random_tile_wrapper(boards)
-# insert_random_tile_wrapper(boards)
+# boards = board_to_repr(
+#     torch.tensor(
+#         [[[1, 1, 0, 0], [0, 0, 0, 0], [0, 0, 0, 2], [0, 0, 0, 2]]],
+#         device=DEVICE,
+#         dtype=torch.uint64,
+#     )
+# )
+boards = torch.zeros(128, device=DEVICE, dtype=torch.uint64)
+insert_random_tile_wrapper(boards)
+insert_random_tile_wrapper(boards)
 
 print_boards(repr_to_board(boards))
 print("-" * 100)
@@ -496,14 +511,16 @@ ntuple_values = torch.full(
 )
 # all_moves = do_all_moves_wrapper(boards, move_lut, move_rewards)
 # print_boards(repr_to_board(all_moves[0, :]))
-output = torch.ones((boards.shape[0], 1), device=DEVICE, dtype=torch.int64)
-print(output)
+output = torch.empty((boards.shape[0], 1), device=DEVICE, dtype=torch.int64)
+t = time.time()
 train_epoch_kernel[1, 1](
     boards,
     move_lut,
     move_rewards,
     ntuple_values,
+    output,
     boards.shape[0],
-    BLOCK_SIZE=1024,
+    BLOCK_SIZE=128,
 )
-print(output)
+print(time.time() - t)
+print_boards(repr_to_board(output)[:4, :])
